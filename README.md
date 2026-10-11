@@ -132,6 +132,8 @@ Stop it with **Ctrl+C** in that terminal. If it runs in the background, use `pki
 
 What it shows: an overview (shared session timer, task counts, agents, activity per hour), a Kanban board (Pending, In Progress, In Review, Completed, Blocked) with drag and drop, the agent monitor, messages and requests with answers, the plan and milestones, a live activity feed, the last five commits, search with a command palette (⌘K or Ctrl+K), filters, and settings.
 
+The HTTP API between the page and the server (endpoints, data shapes, error codes) is specified in [`docs/DASHBOARD_API.md`](docs/DASHBOARD_API.md), and `dashboard/test/contract.test.mjs` checks the running server against it.
+
 How it stays in sync:
 - **Reads** parse the Markdown files on every refresh. A native watcher (inotify or FSEvents) on the project folder and `.git` pushes changes to the browser over Server-Sent Events. Edits in Obsidian, by Claude sessions, by Antigravity, or with `wsc` appear within about a second.
 - **Writes** call the same library functions as `wsc` and the Claude tools: file locks, temp file plus rename, one event per action, the duplicate-title check for tasks, and claim refusal when another online agent owns a task (the UI offers an explicit override). You appear in `AGENTS.md` as an agent of kind `human`.
