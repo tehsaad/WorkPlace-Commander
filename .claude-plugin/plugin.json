@@ -1,0 +1,8 @@
+{
+  "name": "workspace-commander",
+  "version": "0.3.0",
+  "description": "Multi-agent workspace command center: shared plan, tasks, messages and requests over Obsidian Markdown, with a live dashboard and Git panel.",
+  "author": { "name": "tehsaad" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

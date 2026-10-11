@@ -1,0 +1,13 @@
+{
+  "name": "workspace-commander",
+  "description": "Workspace Commander: multi-agent coordination over Obsidian Markdown for Claude Code.",
+  "owner": {
+    "name": "tehsaad"
+  },
+  "plugins": [
+    {
+      "name": "workspace-commander",
+      "source": "./"
+    }
+  ]
+}

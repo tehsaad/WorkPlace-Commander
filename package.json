@@ -1,0 +1,39 @@
+{
+  "name": "workspace-commander",
+  "version": "0.3.0",
+  "description": "Multi-agent workspace coordination for Claude Code and any AI agent, over plain Markdown in an Obsidian vault.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "wsc": "dist/cli.js",
+    "wsc-dashboard": "dashboard/server.mjs"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "dashboard",
+    "hooks",
+    "types",
+    ".claude-plugin",
+    "AGENT_PROTOCOL.md",
+    "README.md",
+    "install.sh"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "dev": "tsc -p tsconfig.json --watch --preserveWatchOutput",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.mod.json",
+    "test": "npm run build && node --test test/*.test.mjs dashboard/test/*.test.mjs",
+    "test:mod": "claude plugin validate . && claude plugin test .",
+    "clean": "rm -rf dist",
+    "dashboard": "node dashboard/server.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "typescript": "5.9.3"
+  }
+}
