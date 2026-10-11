@@ -1,5 +1,7 @@
 # Workspace Commander
 
+> Trying to build a Jarvis (local).
+
 Workspace Commander turns Claude Code into a multi-agent command center. Several AI coding agents (Claude Code sessions, Antigravity, Cursor, or any tool that can read and write files) coordinate on one project through plain Markdown in an Obsidian vault. They share a plan, own tasks, send messages, and ask each other questions.
 
 No agent needs Workspace Commander installed or a direct API to another agent. The Markdown files *are* the protocol: [`AGENT_PROTOCOL.md`](AGENT_PROTOCOL.md).
