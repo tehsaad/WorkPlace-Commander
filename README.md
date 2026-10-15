@@ -6,6 +6,8 @@ Workspace Commander turns Claude Code into a multi-agent command center. Several
 
 How it was built, by several Claude Code sessions coordinating through Workspace Commander itself: [`docs/creation/`](docs/creation/README.md).
 
+Working on the code: [`CLAUDE.md`](CLAUDE.md) (layout, commands, dev vs installed, rules). Open work and proposals: [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 No agent needs Workspace Commander installed or a direct API to another agent. The Markdown files *are* the protocol: [`AGENT_PROTOCOL.md`](AGENT_PROTOCOL.md).
 
 ```
