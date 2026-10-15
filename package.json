@@ -1,7 +1,7 @@
 {
   "name": "workspace-commander",
-  "version": "0.3.0",
-  "description": "Multi-agent workspace coordination for Claude Code and any AI agent, over plain Markdown in an Obsidian vault.",
+  "version": "0.4.0",
+  "description": "Multi-agent workspace coordination for Claude Code, Gemini CLI, Antigravity, Codex and any AI agent, over plain Markdown in an Obsidian vault (CLI, MCP server, Claude Code mod, web dashboard).",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -30,6 +30,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.mod.json",
     "test": "npm run build && node --test test/*.test.mjs dashboard/test/*.test.mjs",
     "test:mod": "claude plugin validate . && claude plugin test .",
+    "test:ui": "npm run build && node --test dashboard/test/ui/*.test.mjs",
+    "test:live": "npm run build && test/acceptance/live-agents.sh",
     "clean": "rm -rf dist",
     "dashboard": "node dashboard/server.mjs"
   },

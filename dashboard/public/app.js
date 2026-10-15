@@ -30,7 +30,7 @@ const EVENT_GROUPS = {
   tasks: ['TASK_CREATED', 'TASK_CLAIMED', 'TASK_RELEASED', 'TASK_STATUS', 'TASK_COMPLETED', 'PLAN_CREATED'],
   comms: ['MESSAGE_SENT', 'REQUEST_CREATED', 'REQUEST_ANSWERED', 'REQUEST_CLOSED'],
   agents: ['AGENT_REGISTERED', 'AGENT_STATUS', 'SESSION_STARTED', 'SESSION_ENDED'],
-  progress: ['MILESTONE_REACHED', 'COMMIT_CREATED'],
+  progress: ['MILESTONE_REACHED', 'COMMIT_CREATED', 'NOTE_ADDED'],
 }
 
 // ------------------------------------------------------------------ prefs
@@ -70,6 +70,10 @@ const S = {
   activity: { group: 'all', agent: '' },
   seenEvents: new Set(),
   flash: new Set(),
+  /** Task shown in the detail drawer, and the element to refocus when it closes. */
+  detail: null,
+  detailReturn: null,
+  loadedAt: 0,
 }
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
@@ -165,6 +169,7 @@ const pill = (status, label = status.replace('_', ' ').toLowerCase()) => `<span 
 async function api(path, init = {}) {
   const res = await fetch(path, { ...init, headers: { 'x-wc-token': TOKEN, 'content-type': 'application/json', ...(init.headers ?? {}) } })
   const body = await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }))
+  if (res.status === 403 && /token/i.test(body.error ?? '')) reloadForNewToken()
   if (!res.ok) {
     const error = new Error(body.error || `HTTP ${res.status}`)
     error.code = body.code
@@ -191,6 +196,31 @@ async function act(action, args = {}, { success, forceable = false } = {}) {
   }
 }
 
+/**
+ * The server hands each page a per-run token. After the server restarts, the
+ * open page's token is refused: reload once to get the new one (at most every
+ * 15 s, so a misconfigured server cannot cause a reload loop).
+ */
+function reloadForNewToken() {
+  let last = 0
+  try {
+    last = Number(sessionStorage.getItem('wc:reloadAt') || 0)
+  } catch {}
+  if (Date.now() - last < 15_000) return
+  try {
+    sessionStorage.setItem('wc:reloadAt', String(Date.now()))
+  } catch {}
+  location.reload()
+}
+
+/** Announces a change to screen readers without moving focus. */
+function announce(text) {
+  const el = document.getElementById('sr-live')
+  if (!el || !text) return
+  el.textContent = ''
+  setTimeout(() => (el.textContent = text), 30)
+}
+
 let refreshTimer
 let refreshing = false
 async function refresh() {
@@ -205,9 +235,17 @@ async function refresh() {
     const previous = S.data
     S.data = await api(`/api/state?project=${encodeURIComponent(S.project)}`)
     S.error = ''
+    S.loadedAt = Date.now()
     if (previous) {
       const before = new Map(previous.snapshot.tasks.map(t => [t.id, `${t.status}|${t.owner}|${t.progress}|${t.title}`]))
-      for (const t of S.data.snapshot.tasks) if (before.get(t.id) !== `${t.status}|${t.owner}|${t.progress}|${t.title}`) S.flash.add(t.id)
+      const changed = []
+      for (const t of S.data.snapshot.tasks) {
+        if (before.get(t.id) !== `${t.status}|${t.owner}|${t.progress}|${t.title}`) {
+          S.flash.add(t.id)
+          changed.push(`${t.id} ${t.status.replace('_', ' ').toLowerCase()}${t.owner ? `, ${t.owner}` : ''}`)
+        }
+      }
+      if (changed.length) announce(`Updated: ${changed.slice(0, 3).join('; ')}${changed.length > 3 ? ` and ${changed.length - 3} more` : ''}`)
     }
     render()
     S.flash.clear()
@@ -238,8 +276,10 @@ function connectLive() {
   })
   source.onerror = () => {
     S.connection = 'offline'
-    renderTopbar()
+    render()
     source.close()
+    // EventSource hides the status: ask once whether the token is the problem.
+    api('/api/projects').catch(() => {})
     setTimeout(connectLive, retry)
     retry = Math.min(retry * 2, 15_000)
   }
@@ -288,7 +328,8 @@ function render() {
   document.querySelectorAll('[data-scroll]').forEach(el => (scroll[el.dataset.scroll] = el.scrollTop))
 
   $root.className = `app${S.collapsed ? ' collapsed' : ''}${S.navOpen ? ' nav-open' : ''}`
-  $root.innerHTML = `${sidebar()}<div class="scrim" data-act="close-nav"></div><main class="main"><header class="topbar" id="topbar">${topbar()}</header>${content()}</main>`
+  $root.innerHTML = `<a class="skip-link" href="#main-content">Skip to content</a>${sidebar()}<div class="scrim" data-act="close-nav"></div><main class="main" id="main-content" tabindex="-1"><header class="topbar" id="topbar">${topbar()}</header>${banner()}${content()}</main>`
+  renderDrawer()
 
   document.querySelectorAll('[data-draft]').forEach(el => {
     if (drafts[el.dataset.draft] !== undefined) el.value = drafts[el.dataset.draft]
@@ -356,8 +397,10 @@ function topbar() {
 }
 
 function content() {
-  if (S.error && !S.data) return `<div class="content"><div class="panel"><div class="empty">${icon('help')}Could not load the workspace: ${esc(S.error)}</div></div></div>`
-  if (!S.data) return `<div class="content"><div class="empty">Loading…</div></div>`
+  if (S.error && !S.data) {
+    return `<div class="content"><div class="panel" role="alert"><div class="empty">${icon('help')}Could not load the workspace: ${esc(S.error)}<div style="margin-top:12px"><button class="btn" data-act="retry">Try again</button></div></div></div></div>`
+  }
+  if (!S.data) return `<div class="content"><div class="loading" role="status" aria-live="polite"><span class="spinner" aria-hidden="true"></span>Loading the workspace…</div></div>`
   switch (S.view) {
     case 'projects': return `<div class="content">${viewProjects()}</div>`
     case 'agents': return `<div class="content">${viewAgents()}</div>`
@@ -369,6 +412,19 @@ function content() {
     case 'settings': return `<div class="content">${viewSettings()}</div>`
     default: return `<div class="content">${viewOverview()}</div>`
   }
+}
+
+/** Shown above the view while the data on screen may be out of date. */
+function banner() {
+  if (!S.data) return ''
+  const at = S.loadedAt ? new Date(S.loadedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+  if (S.error) {
+    return `<div class="banner error" role="alert">${icon('help')}<span class="grow">Lost contact with the dashboard server (${esc(S.error)}). Showing the workspace as of ${esc(at)}; retrying.</span><button class="btn sm" data-act="retry">Retry now</button></div>`
+  }
+  if (S.connection === 'offline') {
+    return `<div class="banner warn" role="status">${icon('clock')}<span class="grow">Live updates paused, reconnecting. Changes made elsewhere appear once the connection is back.</span><button class="btn sm" data-act="retry">Reload data</button></div>`
+  }
+  return ''
 }
 
 const head = (title, sub, actions = '') => `<div class="section-head"><div><h1>${esc(title)}</h1>${sub ? `<p>${sub}</p>` : ''}</div>${actions ? `<div class="actions">${actions}</div>` : ''}</div>`
@@ -470,7 +526,7 @@ function viewAgents() {
   return `${head('Agents', `${onlineAgents().length} online of ${agents().length}. Offline after ${S.data.config.staleAgentMinutes} minutes without activity.`,
     `<label class="row faint" style="gap:6px">Your status <select class="select" style="width:150px" data-change="my-status">${AGENT_STATUSES.map(s => `<option${(mine?.status ?? 'IDLE') === s ? ' selected' : ''}>${s}</option>`).join('')}</select></label>`)}
   <section class="panel"><div class="table-wrap"><table class="table">
-    <thead><tr><th>Agent</th><th>Status</th><th>Current task</th><th class="hide-md">Session</th><th class="hide-sm">Last activity</th><th class="num">Requests</th></tr></thead>
+    <thead><tr><th scope="col">Agent</th><th scope="col">Status</th><th scope="col">Current task</th><th scope="col" class="hide-md">Capabilities</th><th scope="col" class="hide-md">Session</th><th scope="col" class="hide-sm">Last activity</th><th scope="col" class="num">Requests</th></tr></thead>
     <tbody>${list.map(a => {
       const on = online(a)
       const start = parseTime(a.started)
@@ -480,11 +536,12 @@ function viewAgents() {
         <td><div class="row">${avatar(a.id, true)}<div><div><b>${esc(a.id)}</b>${isMe(a.id) ? ' <span class="faint">(you)</span>' : ''}</div><div class="faint" style="font-size:12px">${esc(a.kind)}${a.branch ? ` · ${esc(a.branch)}` : ''}</div></div></div></td>
         <td><div class="row" style="gap:6px"><span class="dot ${on ? 'live' : ''}" title="${on ? 'online' : 'offline'}"></span>${on ? pill(a.status) : '<span class="pill no-dot">offline</span>'}</div></td>
         <td><div class="truncate" style="max-width:340px">${esc(a.task || '—')}</div>${a.workingState ? `<div class="faint truncate" style="font-size:12px;max-width:340px">${esc(a.workingState)}</div>` : ''}</td>
+        <td class="hide-md"><div class="tags">${(a.capabilities ?? []).map(c => `<span class="tag">${esc(c)}</span>`).join('') || '<span class="faint">—</span>'}</div></td>
         <td class="hide-md nowrap"${on ? ` data-tick="since" data-since="${start ?? ''}"` : ''}>${start === undefined ? '—' : duration(end - start)}</td>
         <td class="hide-sm nowrap" title="${esc(fullTime(a.lastActivity))}">${ago(a.lastActivity)}</td>
         <td class="num">${reqs ? `<span class="pill s-OPEN">${reqs}</span>` : '<span class="faint">0</span>'}</td>
       </tr>`
-    }).join('') || `<tr><td colspan="6">${empty('No agent has registered yet.', 'agents')}</td></tr>`}</tbody>
+    }).join('') || `<tr><td colspan="7">${empty('No agent has registered yet. Claude Code sessions register by themselves; other tools: wsc agent-setup <tool>.', 'agents')}</td></tr>`}</tbody>
   </table></div></section>`
 }
 
@@ -516,7 +573,7 @@ function viewTasks() {
 
 function card(t) {
   const d = taskDuration(t)
-  return `<article class="card${S.flash.has(t.id) ? ' flash' : ''}" draggable="true" data-task="${esc(t.id)}" tabindex="0">
+  return `<article class="card${S.flash.has(t.id) ? ' flash' : ''}" draggable="true" data-task="${esc(t.id)}" tabindex="0" aria-label="${esc(`${t.id} ${t.title}, ${t.status.replace('_', ' ').toLowerCase()}${t.owner ? `, owner ${t.owner}` : ', unassigned'}. Enter for details`)}">
     <div class="card-top"><span class="card-id">${esc(t.id)}</span><button class="btn ghost sm icon-only card-menu" data-menu="${esc(t.id)}" aria-label="Task actions">${icon('more')}</button></div>
     <div class="card-title">${esc(t.title)}</div>
     ${t.progress !== undefined && t.status !== 'DONE' ? `<div class="bar"><i style="width:${t.progress}%;background:${STATUS_COLOR[t.status]}"></i></div>` : ''}
@@ -963,13 +1020,122 @@ function focusCard(id) {
   el.focus()
 }
 
+// ------------------------------------------------------------------ task details
+
+function openTask(id, returnTo = document.activeElement) {
+  S.detail = id
+  S.detailReturn = returnTo instanceof HTMLElement ? returnTo : null
+  renderDrawer()
+  document.querySelector('.drawer')?.focus()
+}
+
+function closeTask() {
+  if (!S.detail) return false
+  const back = S.detailReturn
+  S.detail = null
+  S.detailReturn = null
+  renderDrawer()
+  // The card may have been re-rendered meanwhile: refocus it by id.
+  const card = back?.dataset?.task ? document.querySelector(`[data-task="${CSS.escape(back.dataset.task)}"]`) : back
+  card?.focus?.()
+  return true
+}
+
+/** Drawn on every render, so the open task follows live changes. */
+function renderDrawer() {
+  const root = document.getElementById('drawer-root')
+  if (!root) return
+  if (!S.detail || !S.data) {
+    root.innerHTML = ''
+    return
+  }
+  const keepScroll = root.querySelector('.drawer-body')?.scrollTop
+  const hadFocus = root.contains(document.activeElement)
+  const t = tasks().find(x => x.id === S.detail)
+  root.innerHTML = `<div class="drawer-scrim" data-act="close-task"></div>
+    <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title" tabindex="-1">
+      <div class="drawer-head"><span class="mono faint">${esc(S.detail)}</span><h2 id="drawer-title" class="grow truncate">${esc(t?.title ?? 'Task not found')}</h2><button class="btn ghost sm icon-only" data-act="close-task" aria-label="Close details">${icon('x')}</button></div>
+      <div class="drawer-body">${t ? taskDetail(t) : empty(`${S.detail} is no longer in TASKS.md.`, 'tasks')}</div>
+    </aside>`
+  if (keepScroll) root.querySelector('.drawer-body').scrollTop = keepScroll
+  if (hadFocus) root.querySelector('.drawer')?.focus()
+}
+
+function taskDetail(t) {
+  const owned = t.owner && t.owner !== '-'
+  const mine = isMe(t.owner)
+  const ownerAgent = agents().find(a => a.id === t.owner)
+  const d = taskDuration(t)
+  const field = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`
+  const time = iso => (iso ? `<span title="${esc(fullTime(iso))}">${esc(fullTime(iso))} · ${ago(iso)}</span>` : '<span class="faint">—</span>')
+  const history = (S.data.snapshot.events ?? []).filter(e => e.ref === t.id).slice(-30).reverse()
+  const blocking = tasks().filter(x => x.depends.includes(t.id))
+  const actions = [
+    !mine && t.status !== 'DONE' ? `<button class="btn primary" data-detail="claim">${owned ? `Take over from ${esc(t.owner)}` : 'Claim'}</button>` : '',
+    t.status !== 'DONE' ? `<button class="btn" data-detail="progress">Set progress…</button>` : '',
+    `<label class="row" style="gap:6px"><span class="faint">Move to</span><select class="select" data-change="detail-move" aria-label="Move to column"><option value="">—</option>${COLUMNS.filter(c => c.status !== t.status).map(c => `<option value="${c.status}">${c.label}</option>`).join('')}</select></label>`,
+    mine ? `<button class="btn" data-detail="release">Release</button>` : '',
+    owned && !mine ? `<button class="btn" data-detail="message">Message ${esc(t.owner)}</button>` : '',
+  ].filter(Boolean)
+  return `<div class="row" style="gap:8px;flex-wrap:wrap">${pill(t.status)}${owned ? `${avatar(t.owner)}<b>${esc(t.owner)}</b>${ownerAgent ? `<span class="faint">${esc(ownerAgent.kind)} · ${online(ownerAgent) ? 'online' : 'offline'}</span>` : '<span class="faint">not in AGENTS.md</span>'}` : '<span class="faint">Unassigned</span>'}</div>
+    ${t.progress !== undefined ? `<div class="bar" style="margin-top:12px" role="progressbar" aria-valuenow="${t.progress}" aria-valuemin="0" aria-valuemax="100" aria-label="Progress"><i style="width:${t.progress}%;background:${STATUS_COLOR[t.status]}"></i></div>` : ''}
+    <div class="detail-actions">${actions.join('')}</div>
+    <dl class="kv">
+      ${field('Progress', t.progress === undefined ? '<span class="faint">—</span>' : `${t.progress}%`)}
+      ${field('Depends on', t.depends.length ? t.depends.map(dep => `<button class="link" data-detail-open="${esc(dep)}">${esc(dep)}</button> ${(() => { const x = tasks().find(y => y.id === dep); return x ? pill(x.status) : '<span class="faint">unknown</span>' })()}`).join(' ') : '<span class="faint">nothing</span>')}
+      ${field('Blocks', blocking.length ? blocking.map(x => `<button class="link" data-detail-open="${esc(x.id)}">${esc(x.id)}</button>`).join(' ') : '<span class="faint">nothing</span>')}
+      ${field('Created', time(t.created))}
+      ${field('Started', time(t.started))}
+      ${field('Updated', time(t.updated))}
+      ${field('Completed', time(t.completed))}
+      ${d !== undefined ? field(t.status === 'DONE' ? 'Took' : 'Running for', esc(duration(d))) : ''}
+    </dl>
+    <h3 class="detail-h">Notes</h3>
+    <div class="md">${t.notes ? markdown(t.notes) : '<p class="faint">No notes. Agents add them with task_update or task_complete notes.</p>'}</div>
+    <h3 class="detail-h">History</h3>
+    ${history.length ? `<ol class="history">${history.map(e => `<li><span class="mono faint nowrap">${esc(hhmm(e.timestamp))}</span> <b>${esc(e.agent)}</b> <span class="muted">${esc(e.summary)}</span></li>`).join('')}</ol>` : '<p class="faint">No recorded events for this task in the recent log.</p>'}`
+}
+
+/** Keeps Tab inside the topmost open dialog (modal, palette, then the drawer). */
+function trapFocus(e) {
+  const dialog = document.querySelector('#modal-root [role=dialog], #palette-root [role=dialog], #drawer-root [role=dialog]')
+  if (!dialog) return
+  const focusable = [...dialog.querySelectorAll('a[href], button:not([disabled]), input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter(el => el.offsetParent !== null)
+  if (!focusable.length) return
+  const first = focusable[0]
+  const last = focusable.at(-1)
+  if (!dialog.contains(document.activeElement)) {
+    e.preventDefault()
+    first.focus()
+  } else if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+    e.preventDefault()
+    last.focus()
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault()
+    first.focus()
+  }
+}
+
 // ------------------------------------------------------------------ events
 
 document.addEventListener('click', e => {
-  const t = e.target.closest('[data-go],[data-act],[data-menu],[data-project],[data-comms-tab],[data-msg-filter],[data-req-filter],[data-select-request],[data-close-request],[data-compose],[data-open-task],[data-open-request],[data-activity-group],[data-toggle]')
+  const t = e.target.closest('[data-go],[data-act],[data-menu],[data-project],[data-comms-tab],[data-msg-filter],[data-req-filter],[data-select-request],[data-close-request],[data-compose],[data-open-task],[data-open-request],[data-activity-group],[data-toggle],[data-detail],[data-detail-open]')
   if (!e.target.closest('.menu')) closeMenu()
-  if (!t) return
+  if (!t) {
+    const card = e.target.closest('[data-task]')
+    if (card && !card.classList.contains('dragging')) openTask(card.dataset.task, card)
+    return
+  }
   const d = t.dataset
+  if (d.detailOpen) return openTask(d.detailOpen, S.detailReturn)
+  if (d.detail) {
+    const task = tasks().find(x => x.id === S.detail)
+    if (!task) return
+    if (d.detail === 'claim') return act('task.claim', { id: task.id }, { success: `You claimed ${task.id}`, forceable: true })
+    if (d.detail === 'progress') return progressDialog(task)
+    if (d.detail === 'release') return act('task.release', { id: task.id }, { success: `${task.id} released` })
+    if (d.detail === 'message') { closeTask(); return composeTo(task.owner, `About ${task.id} (${task.title}): `) }
+  }
   if (d.go) return go(d.go)
   if (d.menu) return openTaskMenu(d.menu, t)
   if (d.project) return switchProject(d.project)
@@ -979,7 +1145,7 @@ document.addEventListener('click', e => {
   if (d.selectRequest) { S.comms.selected = d.selectRequest; return render() }
   if (d.closeRequest) return act('request.close', { id: d.closeRequest }, { success: `${d.closeRequest} closed` })
   if (d.compose) return composeTo(d.compose)
-  if (d.openTask) { go('tasks'); return setTimeout(() => focusCard(d.openTask), 30) }
+  if (d.openTask) { go('tasks'); return setTimeout(() => { focusCard(d.openTask); openTask(d.openTask, document.querySelector(`[data-task="${CSS.escape(d.openTask)}"]`)) }, 30) }
   if (d.openRequest) { S.comms = { ...S.comms, tab: 'requests', selected: d.openRequest, reqFilter: 'all' }; return go('messages') }
   if (d.activityGroup) { S.activity.group = d.activityGroup; return render() }
   if (d.toggle) {
@@ -993,6 +1159,8 @@ document.addEventListener('click', e => {
     case 'open-nav': S.navOpen = true; return render()
     case 'close-nav': S.navOpen = false; return render()
     case 'palette': return openPalette()
+    case 'close-task': return closeTask()
+    case 'retry': S.error = ''; render(); connectLive(); return refresh()
     case 'new-task': return newTaskDialog()
     case 'new-request': return newRequestDialog()
     case 'new-plan': return newPlanDialog()
@@ -1007,6 +1175,7 @@ document.addEventListener('change', e => {
   if (d.change === 'project') return switchProject(e.target.value)
   if (d.change === 'board-owner') { S.board.owner = e.target.value; return render() }
   if (d.change === 'activity-agent') { S.activity.agent = e.target.value; return render() }
+  if (d.change === 'detail-move' && e.target.value && S.detail) return moveTask(S.detail, e.target.value)
   if (d.change === 'my-status') return act('agent.status', { status: e.target.value }, { success: `You are ${e.target.value}` })
 })
 
@@ -1086,10 +1255,13 @@ document.addEventListener('keydown', e => {
   const typing = /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName ?? '') || document.activeElement?.isContentEditable
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return openPalette() }
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && document.activeElement?.form) { e.preventDefault(); return document.activeElement.form.requestSubmit() }
+  if (e.key === 'Tab') return trapFocus(e)
   if (e.key === 'Escape') {
     closeMenu()
+    const hadDialog = document.getElementById('modal-root').innerHTML || document.getElementById('palette-root').innerHTML
     document.getElementById('modal-root').innerHTML = ''
     document.getElementById('palette-root').innerHTML = ''
+    if (!hadDialog && closeTask()) return
     if (S.navOpen) { S.navOpen = false; render() }
     return
   }
@@ -1103,7 +1275,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'g') { gPrefix = true; setTimeout(() => (gPrefix = false), 900); return }
   if (e.key === 'n') { e.preventDefault(); return newTaskDialog() }
   const card = document.activeElement?.closest?.('[data-task]')
-  if (card && e.key === 'Enter') return openTaskMenu(card.dataset.task, card.querySelector('[data-menu]'))
+  if (card && e.key === 'Enter' && document.activeElement === card) return openTask(card.dataset.task, card)
+  if (card && e.key === 'm') return openTaskMenu(card.dataset.task, card.querySelector('[data-menu]'))
 })
 
 // Live clocks without re-rendering.
