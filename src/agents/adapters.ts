@@ -81,7 +81,8 @@ export const ADAPTERS: readonly AgentAdapter[] = [
     executables: ['claude'],
     configDirs: ['~/.claude'],
     instructions: { how: 'Nothing to configure: the Workspace Commander plugin briefs every session.' },
-    verified: 'claude plugin test (mod tests in the host) and a live `claude -p` session in test/acceptance/live-agents.sh',
+    verified:
+      'claude plugin test (9 mod tests in the host) and a live headless session (Claude Code 2.1.300, 2026-10-15): registered, claimed, messaged, completed through the plugin tools (test/acceptance/live-agents.sh claude).',
     notes: ['Install the plugin once: ./install.sh (or claude plugin install workspace-commander@workspace-commander).'],
   },
   {
@@ -151,8 +152,13 @@ export const ADAPTERS: readonly AgentAdapter[] = [
       config: '~/.codex/config.toml → [mcp_servers.workspace-commander]',
       snippet: 'toml-codex',
     },
-    verified: '',
-    notes: ['Codex runs shell commands in a sandbox: writes to the vault from `wsc` need it allowed, so prefer the MCP route.'],
+    verified:
+      'Live with codex-cli 0.158.0-alpha.2 (2026-10-15): `codex exec` registered through wsc mcp, claimed, messaged and completed a task (test/acceptance/live-agents.sh codex).',
+    notes: [
+      'Codex asks before each MCP tool call; `codex exec` (no one to ask) refuses them unless the server sets default_tools_approval_mode = "approve".',
+      'Codex does not pass your shell environment to MCP servers: set WSC_VAULT and friends in the server env table if you rely on them.',
+      'Codex runs shell commands in a sandbox: writes to the vault from `wsc` need it allowed, so prefer the MCP route.',
+    ],
   },
   {
     key: 'cursor',

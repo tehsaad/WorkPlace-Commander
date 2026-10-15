@@ -84,6 +84,8 @@ export function mcpInstructions(adapter: AgentAdapter, id: string, cwd?: string)
       '[mcp_servers.workspace-commander]',
       `command = ${JSON.stringify(launch.command)}`,
       `args = [${launch.args.map(a => JSON.stringify(a)).join(', ')}]`,
+      '# Without this, Codex asks before every call (and `codex exec` refuses them):',
+      '# default_tools_approval_mode = "approve"',
     ].join('\n')
   }
   return out

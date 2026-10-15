@@ -57,6 +57,18 @@ interface Pending {
   timer: NodeJS.Timeout
 }
 
+/** Tools that only read (and mark messages delivered); everything else appends or edits records. */
+const READ_ONLY_TOOLS = new Set(['workspace_status', 'request_wait'])
+
+/**
+ * MCP tool annotations: clients use them to decide what needs approval. No
+ * tool deletes anything or reaches outside this machine.
+ */
+function annotationsOf(name: string): Record<string, boolean> {
+  const readOnly = READ_ONLY_TOOLS.has(name)
+  return { readOnlyHint: readOnly, destructiveHint: false, idempotentHint: readOnly, openWorldHint: false }
+}
+
 export function startMcpServer(options: McpServerOptions): { close: (reason?: string) => void } {
   const input = options.input ?? process.stdin
   const output = options.output ?? process.stdout
@@ -207,7 +219,7 @@ export function startMcpServer(options: McpServerOptions): { close: (reason?: st
         return reply(id, {
           tools: Object.values(COORDINATION_TOOLS)
             .filter(t => !t.surfaces || t.surfaces.includes('mcp'))
-            .map(t => ({ name: t.spec.name, description: t.spec.description, inputSchema: t.spec.inputSchema })),
+            .map(t => ({ name: t.spec.name, description: t.spec.description, inputSchema: t.spec.inputSchema, annotations: annotationsOf(t.spec.name) })),
         })
       case 'tools/call': {
         const name = String(params.name ?? '')
