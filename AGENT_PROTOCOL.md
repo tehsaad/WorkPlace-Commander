@@ -47,10 +47,11 @@ Rules:
 - Timestamps are ISO 8601 with offset: `2026-10-08T19:41:20+05:00`.
 - Keys are case-insensitive. Keep unknown lines; never delete other agents' content.
 - Use `-` for an empty value (`- Owner: -`).
+- Free text (a message, question, answer, or note) must not start a line with `## ` or `### `, because the parser would read it as a new record or a new answer. Write such a line as `\## ` or `\### ` (Markdown still shows `##`). Do not open a code fence without closing it.
 
 ## 3. Register
 
-Pick an agent ID: `<Tool>-<NN>`, e.g. `Antigravity-01`. Use the lowest number that is not online in `AGENTS.md`. Append your section:
+Pick an agent ID: `<Tool>-<NN>`, e.g. `Antigravity-01`: a letter, then letters, digits, `.`, `_` or `-`, at most 41 characters. Use the lowest number that is not online in `AGENTS.md`. Append your section:
 
 ```markdown
 ## Antigravity-01
@@ -64,6 +65,8 @@ Pick an agent ID: `<Tool>-<NN>`, e.g. `Antigravity-01`. Use the lowest number th
 - Working State: Session started
 - Online: yes
 ```
+
+Optional fields: `- Capabilities: files, shell, mcp` (what your tool can do: `files`, `shell`, `mcp`, `hooks`, `heartbeat`, `wake`, `git`) and `- Process: <pid>@<host>` (written by `wsc mcp`, so a restarted tool can tell that the previous process is gone).
 
 Statuses: `IDLE` `PLANNING` `WORKING` `BLOCKED` `WAITING` `REVIEWING` `COMPLETED`.
 Update `Last Activity` whenever you act. An agent whose `Last Activity` is older than 30 minutes, or that has `Online: no`, counts as **offline**. Other agents may then set its `Online: no` (and only that and `Working State`). If that happens to you while you are still working, set `Online: yes` and a fresh `Last Activity` in your section.
@@ -96,13 +99,15 @@ Every plan task must also exist in `TASKS.md`. Before adding a task, check that 
 
 Task statuses: `PENDING` → `IN_PROGRESS` → `REVIEW` → `DONE`, or `BLOCKED` at any point.
 
-**Claim.** You may claim a task when `Owner` is `-`, or when its owner is offline (section 3). Never take a task an online agent owns. Message them instead. To claim:
+**Claim.** You may claim a task when `Owner` is `-`, or when its owner is offline (section 3). An owner that has no section in `AGENTS.md` counts as online while the task's `Updated` is less than 30 minutes old. Never take a task an online agent owns. Message them instead. To claim:
 1. Re-read `TASKS.md` right before editing.
 2. Set `- Owner: <your ID>`, `- Status: IN_PROGRESS`, `- Started:` (if empty), and `- Updated:`.
 3. Set `Status: WORKING` and `Task: TASK-003 Implement backend` in your `AGENTS.md` section.
 4. Re-read the task. If another agent's ID is in `Owner`, they won the race: put it back and pick another task.
 
 **Progress.** Update `- Progress: 60%` and `- Updated:`. For `BLOCKED` or `REVIEW`, add a one-line note under the fields saying why.
+
+**After a restart,** look for tasks whose `Owner` is your ID and that are not `DONE`: they are still yours. Resume them, or release them.
 
 **Release.** If you stop working on a task, set `- Owner: -` and `- Status: PENDING`, and add a note such as `> Released by Antigravity-01: needs DB access`.
 
@@ -206,7 +211,7 @@ Events are optional for agents writing by hand. The record files are the source 
 ## 11. Conflict handling
 
 - **Prefer appending to rewriting.** Change single lines; never rewrite a whole file you do not own.
-- **Lock files.** Workspace Commander agents take a lock at `.wc/locks/<FILE>.lock` (created exclusively) while editing a file, and write through a temp file plus rename. If you can, create that lock file before editing and delete it after. A lock older than 10 seconds is abandoned.
+- **Lock files.** Workspace Commander agents take a lock at `.wc/locks/<FILE>.lock` (created exclusively) while editing a file, and write through a temp file plus rename. If you can, create that lock file before editing and delete it after. A lock older than 10 seconds, or one whose holder process on the same machine has exited, is abandoned; Workspace Commander takes it over through `<FILE>.lock.steal`, so only one agent wins.
 - **Ownership is final once re-read.** If two agents claim the same task, the one whose ID is in `Owner` after re-reading keeps it.
 - **Duplicate IDs.** If you find two records with the same ID, leave them alone and send a message to `ALL`. Never renumber another agent's records.
 - **Disagreements** go in a request with `To: ALL`, never in edits to someone else's section.
@@ -221,6 +226,9 @@ wsc tasks
 wsc task claim TASK-003 --agent Antigravity-01
 wsc request answer REQUEST-009 "Findings: ..." --agent Antigravity-01
 wsc msg send --to Claude-01 "Frontend done" --agent Antigravity-01
+wsc context --agent Antigravity-01 --mark-read   # your briefing: your open tasks, available tasks, unread messages, requests
+wsc request wait REQUEST-010 --timeout 120 --agent Antigravity-01   # block until it is answered
+wsc note add "We use pnpm, not npm" --agent Antigravity-01        # shared context in ProjectNotes.md
 wsc watch            # JSON lines on every change
 wsc project          # which project and workspace folder this repository resolves to
 wsc projects         # every registered project
@@ -228,27 +236,28 @@ wsc projects         # every registered project
 
 ## 13. Configure your AI tool once
 
-Do not paste these instructions into every chat. Put a short standing rule in the place your tool loads into every conversation by itself, with your fixed agent ID. Print it, with the real paths filled in, from any repository:
+Do not paste these instructions into every chat. Put a short standing rule in the place your tool loads into every conversation by itself, with your fixed agent ID. If your tool can start MCP servers, also give it `wsc mcp`: it then has tools for everything in this protocol (`workspace_status`, `task_claim`, `message_send`, `request_create`, `request_wait`, …), registers and heartbeats for you, and marks you offline when the tool exits. Print both, with the real paths filled in, from any repository:
 
 ```bash
-wsc agent-setup antigravity --id Antigravity-01                  # print the rule and where it goes
+wsc adapters                                                     # supported tools and what is installed
+wsc agent-setup antigravity --id Antigravity-01                  # print the rule, where it goes, and the MCP entry
 wsc agent-setup antigravity --id Antigravity-01 --write ~/.gemini/GEMINI.md
 ```
 
-`--write` puts the rule between `<!-- wc:agent-setup:start -->` and `<!-- wc:agent-setup:end -->` markers. The rest of the file is kept, and the previous file is copied to `<file>.bak-<time>` first. Running it again replaces only that block.
+`--write` puts the rule between `<!-- wc:agent-setup:start -->` and `<!-- wc:agent-setup:end -->` markers, one `## Workspace Commander · <tool>` section per tool (Gemini CLI and Antigravity share `~/.gemini/GEMINI.md`). The rest of the file is kept, and the previous file is copied to `<file>.bak-<time>` first. Running it again replaces only that tool's section. Details per tool: `docs/INTEGRATIONS.md` in the Workspace Commander repository.
 
-| Tool | Where the rule goes |
-| --- | --- |
-| Antigravity | Customizations → Rules → Global (`~/.gemini/GEMINI.md`), or a workspace rule in `<repo>/.agent/rules/` |
-| Cursor | Settings → Rules → User Rules, or `<repo>/.cursor/rules/` |
-| Codex CLI | `~/.codex/AGENTS.md`, or `AGENTS.md` at the repository root |
-| Gemini CLI | `~/.gemini/GEMINI.md`, or `GEMINI.md` at the repository root |
-| Claude Code | Nothing to do: the Workspace Commander plugin registers each session and adds this protocol on its own |
+| Tool | Where the rule goes | Where the MCP entry goes |
+| --- | --- | --- |
+| Antigravity | Customizations → Rules → Global (`~/.gemini/GEMINI.md`), or a workspace rule in `<repo>/.agent/rules/` | `agy mcp add workspace-commander -- …` (CLI); MCP Servers → Manage → raw config (IDE) |
+| Cursor | Settings → Rules → User Rules, or `<repo>/.cursor/rules/` | `~/.cursor/mcp.json` or `<repo>/.cursor/mcp.json` |
+| Codex CLI | `~/.codex/AGENTS.md`, or `AGENTS.md` at the repository root | `codex mcp add workspace-commander -- …` (`~/.codex/config.toml`) |
+| Gemini CLI | `~/.gemini/GEMINI.md`, or `GEMINI.md` at the repository root | `~/.gemini/settings.json` → `mcpServers` |
+| Claude Code | Nothing to do: the Workspace Commander plugin registers each session and adds this protocol on its own | not needed |
 
 Without the CLI, copy the rule from this section of any project's `AGENT_PROTOCOL.md` and replace the paths and ID:
 
 ```markdown
-## Workspace Commander (shared multi-agent workspace)
+## Workspace Commander · Antigravity (Antigravity-01)
 
 You work alongside other AI agents through Markdown files in an Obsidian vault. Your agent ID is **Antigravity-01**; use it in every session.
 
