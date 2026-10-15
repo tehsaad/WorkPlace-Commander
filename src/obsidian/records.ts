@@ -16,6 +16,7 @@ import type {
   TaskStatus,
 } from '../types.ts'
 import { humanTime } from '../events/format.ts'
+import { unescapeBody } from '../coordination/validate.ts'
 import { normalizeWord, parseFields, renderSection, splitList, splitSections } from './markdown.ts'
 
 // ---------------------------------------------------------------- statuses
@@ -77,8 +78,13 @@ function orDash(value: string): string {
 }
 
 /** Removes WC_EVENT metadata blocks (they precede the next heading) from a body. */
-function cleanBody(body: string): string {
+function stripEvents(body: string): string {
   return body.replace(/<!--\s*WC_EVENT[\s\S]*?-->/g, '').trim()
+}
+
+/** The body for display: event blocks removed, escaped headings restored. */
+function cleanBody(body: string): string {
+  return unescapeBody(stripEvents(body))
 }
 
 function fromDash(value: string | undefined): string {
@@ -207,7 +213,8 @@ export function parseRequests(text: string): Request[] {
     .sections.filter(s => REQUEST_ID.test(s.id))
     .map(s => {
       const { fields, body } = parseFields(s.raw, REQUEST_FIELDS)
-      const subs = splitSubsections(cleanBody(body))
+      // Split before unescaping: an escaped `\### Answer` inside a body is text, not an answer.
+      const subs = splitSubsections(stripEvents(body)).map(sub => ({ ...sub, text: unescapeBody(sub.text) }))
       const answers: RequestAnswer[] = []
       let question = ''
       for (const sub of subs) {

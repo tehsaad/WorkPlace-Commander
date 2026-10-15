@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 import type { Config, WorkspaceFiles } from '../types.ts'
 import { mergeConfig, workspaceFiles } from './defaults.ts'
@@ -45,6 +45,12 @@ export function gitRoot(cwd: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/** True when `child` is `parent` or inside it (both absolute). */
+export function isInside(parent: string, child: string): boolean {
+  const rel = relative(resolve(parent), resolve(child))
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
 function readJson(path: string): Record<string, unknown> | undefined {
@@ -100,8 +106,15 @@ export function loadConfig(
   const explicit = explicitPath ?? process.env.WSC_CONFIG
   if (explicit) candidates.push(resolve(cwd, expandHome(explicit)))
   let isWorkspacePinned = false
+  let repositoryWorkspaceDir: string | undefined
   for (const [index, path] of candidates.entries()) {
     const layer = readJson(path)
+    if (layer && index === 1) {
+      // The repository's own file arrives with a clone, so it is not trusted
+      // to move the vault or to pin a folder outside it.
+      delete layer.obsidianVault
+      if (typeof layer.workspaceDir === 'string') repositoryWorkspaceDir = layer.workspaceDir
+    }
     if (layer) {
       layers.push(layer)
       sources.push(path)
@@ -127,10 +140,17 @@ export function loadConfig(
     isGitRepo: git !== undefined,
   }
   if (process.env.WSC_WORKSPACE_DIR || isWorkspacePinned) {
+    const workspace = folderOf(config.workspaceDir)
+    if (!process.env.WSC_WORKSPACE_DIR && config.workspaceDir === repositoryWorkspaceDir && !isInside(vault, workspace)) {
+      throw new Error(
+        `${join(projectRoot, PROJECT_CONFIG_NAME)} sets workspaceDir ${JSON.stringify(repositoryWorkspaceDir)}, outside the vault ${vault}. ` +
+          'A repository may only pin a folder inside the vault; set an outside folder in your user config, --config or WSC_WORKSPACE_DIR.',
+      )
+    }
     return {
       ...base,
       project: config.project ?? basename(projectRoot),
-      workspace: folderOf(config.workspaceDir),
+      workspace,
       workspaceSource: process.env.WSC_WORKSPACE_DIR ? 'env' : 'config',
     }
   }

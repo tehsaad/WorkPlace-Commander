@@ -5,6 +5,7 @@ import { parseAgents, renderAgent, toAgentStatus } from '../obsidian/records.ts'
 import { atomicWrite, readText, withLock } from '../filesystem/atomic.ts'
 import type { Identity, Workspace } from '../obsidian/workspace.ts'
 import type { Agent, AgentStatus } from '../types.ts'
+import { assertAgentId, oneLineText } from '../coordination/validate.ts'
 
 export interface RegisterOptions {
   /** Use exactly this id (Antigravity-01). */
@@ -37,7 +38,7 @@ export function registerAgent(ws: Workspace, options: RegisterOptions): Register
   let result: RegisterResult | undefined
   ws.mutate('agents', text => {
     const agents = parseAgents(text)
-    let id = options.id?.trim()
+    let id = options.id?.trim() ? assertAgentId(options.id) : undefined
     let resumed = false
     if (!id) {
       const mine = agents.find(a => a.session === options.session && options.session !== '')
@@ -115,14 +116,15 @@ export interface AgentUpdate {
 
 /** Updates the agent's own section in place; returns the updated record. */
 export function updateAgent(ws: Workspace, identity: Identity, update: AgentUpdate): Agent {
+  assertAgentId(identity.agent)
   const now = isoNow()
   const text = ws.mutate('agents', current => {
     const fields = [
       { label: 'Status', value: update.status === undefined ? undefined : toAgentStatus(update.status) },
-      { label: 'Task', value: update.task === undefined ? undefined : update.task || '-' },
+      { label: 'Task', value: update.task === undefined ? undefined : oneLineText(update.task, 200) || '-' },
       { label: 'Branch', value: update.branch },
       { label: 'Last Activity', value: now },
-      { label: 'Working State', value: update.workingState === undefined ? undefined : update.workingState || '-' },
+      { label: 'Working State', value: update.workingState === undefined ? undefined : oneLineText(update.workingState, 300) || '-' },
       { label: 'Online', value: update.online === undefined ? 'yes' : update.online ? 'yes' : 'no' },
     ]
     const replaced = replaceSectionRaw(current, identity.agent, raw => setFields(raw, fields))

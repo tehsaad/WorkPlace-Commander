@@ -28,6 +28,7 @@ import {
   releaseTask,
   setTaskStatus,
 } from '../coordination/tasks.ts'
+import { assertAgentId, ValidationError } from '../coordination/validate.ts'
 import { buildDashboard } from '../dashboard/model.ts'
 import { renderTextDashboard } from '../dashboard/text.ts'
 import { newSessionId } from '../events/format.ts'
@@ -149,7 +150,10 @@ function requireArg(value: string | undefined, what: string): string {
 function identityOf(flags: Flags, needed = true): Identity {
   const agent = flags.agent ?? process.env.WSC_AGENT ?? ''
   if (needed && !agent) throw new UsageError('No agent identity: pass --agent <ID> or set WSC_AGENT.')
-  return { agent, session: flags.session ?? process.env.WSC_SESSION ?? 'cli' }
+  if (agent) assertAgentId(agent)
+  const session = (flags.session ?? process.env.WSC_SESSION ?? '') || 'cli'
+  if (!/^[\w.:@-]{1,100}$/.test(session)) throw new UsageError(`Invalid session id ${JSON.stringify(session)}: letters, digits and . _ : @ - only.`)
+  return { agent, session }
 }
 
 function numberFlag(value: string | undefined): number | undefined {
@@ -435,7 +439,11 @@ function listing<T>(items: T[], line: (item: T) => string): CliResult {
 }
 
 export function isUsageError(error: unknown): boolean {
-  return error instanceof UsageError || (error as { code?: string })?.code?.startsWith('ERR_PARSE_ARGS') === true
+  return (
+    error instanceof UsageError ||
+    error instanceof ValidationError ||
+    (error as { code?: string })?.code?.startsWith('ERR_PARSE_ARGS') === true
+  )
 }
 
 export function isCoordinationError(error: unknown): error is CoordinationError {

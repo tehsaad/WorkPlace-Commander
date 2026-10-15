@@ -6,8 +6,9 @@ import { atomicWrite, readText } from '../filesystem/atomic.ts'
 import { nextId, replaceSectionRaw, setFields, upsertSection } from '../obsidian/markdown.ts'
 import { parseAgents, parseTasks, renderTask, toTaskStatus } from '../obsidian/records.ts'
 import type { Identity, Workspace } from '../obsidian/workspace.ts'
-import type { Task, TaskStatus } from '../types.ts'
+import type { Agent, Task, TaskStatus } from '../types.ts'
 import { updateAgent } from '../agents/agents.ts'
+import { assertAgentId, escapeBody } from './validate.ts'
 
 export class CoordinationError extends Error {
   constructor(message: string) {
@@ -47,6 +48,7 @@ export function addTask(
   title: string,
   options: { depends?: string[]; notes?: string } = {},
 ): AddTaskResult {
+  assertAgentId(identity.agent)
   const clean = title.replace(/\s+/g, ' ').trim()
   if (!clean) throw new CoordinationError('A task needs a title')
   let result: AddTaskResult | undefined
@@ -68,7 +70,7 @@ export function addTask(
       updated: now,
       started: '',
       completed: '',
-      notes: options.notes ?? '',
+      notes: escapeBody(options.notes ?? ''),
     }
     result = { task, created: true }
     return upsertSection(text, task.id, renderTask(task))
@@ -91,7 +93,7 @@ export interface ClaimResult {
  * A task whose owner went offline can be taken over.
  */
 export function claimTask(ws: Workspace, identity: Identity, id: string, options: { force?: boolean } = {}): ClaimResult {
-  const agents = parseAgents(readText(ws.path('agents')))
+  assertAgentId(identity.agent)
   const stale = ws.resolved.config.staleAgentMinutes
   const now = isoNow()
   let result: ClaimResult | undefined
@@ -101,8 +103,10 @@ export function claimTask(ws: Workspace, identity: Identity, id: string, options
     if (task.status === 'DONE') throw new CoordinationError(`${task.id} is already DONE`)
     let tookOverFrom: string | undefined
     if (task.owner && task.owner.toLowerCase() !== identity.agent.toLowerCase()) {
-      const owner = agents.find(a => a.id.toLowerCase() === task.owner.toLowerCase())
-      const ownerOnline = owner ? isAgentOnline(owner, Date.now(), stale) : false
+      // Read AGENTS.md under the TASKS.md lock: a claim that landed just
+      // before ours must be judged with its owner's current record.
+      const owner = parseAgents(readText(ws.path('agents'))).find(a => a.id.toLowerCase() === task.owner.toLowerCase())
+      const ownerOnline = isOwnerActive(owner, task, Date.now(), stale)
       if (ownerOnline && !options.force) {
         throw new CoordinationError(
           `${task.id} is owned by ${task.owner} (${owner?.status ?? 'online'}). ` +
@@ -137,6 +141,19 @@ export function claimTask(ws: Workspace, identity: Identity, id: string, options
   return result!
 }
 
+/**
+ * Whether a task's owner still counts as working on it. An owner with an
+ * AGENTS.md record is active while that record is online. An owner without
+ * one (an agent using the CLI ad hoc, or one whose record is still being
+ * written) is active while the task itself was updated recently: otherwise a
+ * claim made milliseconds ago could be "taken over" as if abandoned.
+ */
+export function isOwnerActive(owner: Agent | undefined, task: Task, now: number, staleMinutes: number): boolean {
+  if (owner) return isAgentOnline(owner, now, staleMinutes)
+  const updated = Date.parse(task.updated)
+  return Number.isNaN(updated) ? false : now - updated < staleMinutes * 60_000
+}
+
 export function releaseTask(ws: Workspace, identity: Identity, id: string, options: { force?: boolean; note?: string } = {}): Task {
   const now = isoNow()
   let released: Task | undefined
@@ -154,7 +171,7 @@ export function releaseTask(ws: Workspace, identity: Identity, id: string, optio
           { label: 'Owner', value: '-' },
           { label: 'Updated', value: now },
         ])
-        return options.note ? `${next.trimEnd()}\n\n> Released by ${identity.agent}: ${options.note}\n` : next
+        return options.note ? `${next.trimEnd()}\n\n> Released by ${identity.agent}: ${escapeBody(options.note)}\n` : next
       }) ?? text
     )
   })
@@ -199,7 +216,7 @@ export function setTaskStatus(
           { label: 'Updated', value: now },
           { label: 'Started', value: status === 'IN_PROGRESS' && !task.started ? now : undefined },
         ])
-        return options.note ? `${next.trimEnd()}\n\n> ${identity.agent} (${status}): ${options.note}\n` : next
+        return options.note ? `${next.trimEnd()}\n\n> ${identity.agent} (${status}): ${escapeBody(options.note)}\n` : next
       }) ?? text
     )
   })
@@ -229,7 +246,7 @@ export function completeTask(ws: Workspace, identity: Identity, id: string, opti
           { label: 'Updated', value: now },
           { label: 'Completed', value: now },
         ])
-        return options.note ? `${next.trimEnd()}\n\n> Completed by ${identity.agent}: ${options.note}\n` : next
+        return options.note ? `${next.trimEnd()}\n\n> Completed by ${identity.agent}: ${escapeBody(options.note)}\n` : next
       }) ?? text
     )
   })
