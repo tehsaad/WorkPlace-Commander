@@ -75,7 +75,10 @@ export function mcpInstructions(adapter: AgentAdapter, id: string, cwd?: string)
   const launch = mcpLaunch(id, adapter, cwd)
   const out: McpInstructions = { where: adapter.mcp.config }
   if (adapter.mcp.command) {
-    out.command = adapter.mcp.command.replace('{launch}', [launch.command, ...launch.args].map(shellQuote).join(' '))
+    out.command = adapter.mcp.command
+      .replace('{launch}', [launch.command, ...launch.args].map(shellQuote).join(' '))
+      .replace('{launchCommand}', shellQuote(launch.command))
+      .replace('{launchArgs}', launch.args.map(shellQuote).join(' '))
   }
   if (adapter.mcp.snippet === 'json-mcpServers') {
     out.snippet = JSON.stringify({ mcpServers: { 'workspace-commander': launch } }, null, 2)

@@ -18,8 +18,8 @@ Verified means a real session of that tool, driven by `test/acceptance/live-agen
 | --- | --- | --- | --- |
 | Claude Code | native | **Verified live** | Claude Code 2.1.300, 2026-10-15; plus 9 mod tests in Claude Code's own host (`claude plugin test .`) |
 | OpenAI Codex CLI | mcp | **Verified live** | codex-cli 0.158.0-alpha.2 (`codex exec`), 2026-10-15 |
-| Google Antigravity | mcp | **Not verified live.** The `agy` CLI is installed but was not signed in, so the run stopped at Google sign-in. The MCP server it would use is the same one Codex used. | Protocol tests only |
-| Gemini CLI | mcp | **Not verified live.** Not installed on the machine this was built on. | Protocol tests only |
+| Google Antigravity | mcp | **Not verified live.** The `agy` CLI is installed but not signed in, so the run stopped at Google sign-in. The MCP server it would use is the same one Codex used; running `wsc` inside the `agy` sandbox (with the setup below) was checked. | Protocol tests only |
+| Gemini CLI | mcp | **Not verified live.** Gemini CLI 0.64.0 is installed but not signed in. `gemini mcp add` with the arguments below was checked in a scratch HOME. | Protocol tests only |
 | Cursor | mcp | **Not verified live.** Not installed. | Protocol tests only |
 | Any other agent | files (or mcp) | The Markdown route is exercised by tests that edit the files by hand | `test/integration.test.mjs` |
 
@@ -41,10 +41,10 @@ wsc agent-setup codex --write ~/.codex/AGENTS.md
 ### Gemini CLI
 
 1. `wsc agent-setup gemini --write ~/.gemini/GEMINI.md` (or `GEMINI.md` in the repository).
-2. Add the printed `mcpServers` entry to `~/.gemini/settings.json` (or `<repo>/.gemini/settings.json`).
-3. Start `gemini` in the repository. Ask it to call `workspace_status`.
+2. Run the printed `gemini mcp add --scope user workspace-commander <node> -- <cli.js> mcp --agent Gemini-01 --adapter gemini` (the `--` matters), or add the printed `mcpServers` entry to `~/.gemini/settings.json`.
+3. Sign in once: run `gemini` interactively. Then start it in the repository and ask it to call `workspace_status`.
 
-Manual step: Gemini CLI asks before running MCP tools unless the server is trusted (`"trust": true` in its entry) or you allow them in the session.
+Gemini CLI asks before running MCP tools unless the server is trusted (`--trust` when adding it, or `"trust": true` in its entry).
 
 ### Google Antigravity
 
@@ -52,7 +52,19 @@ Manual step: Gemini CLI asks before running MCP tools unless the server is trust
 2. CLI (`agy`): run the printed `agy mcp add workspace-commander -- …` command. IDE: Agent panel → … → MCP Servers → Manage → View raw config, and add the same command and arguments.
 3. Sign in once interactively (`agy`) before using `agy -p` headless.
 
-The CLI and the IDE keep separate MCP settings.
+The CLI and the IDE keep separate MCP settings. The IDE (`antigravity` snap, classic confinement) keeps them in `~/.gemini/config/mcp_config.json` and runs your `node` normally.
+
+**The `agy` CLI from the `antigravity-cli` snap is strictly confined.** Its home is `~/snap/antigravity-cli/common`, it has no `node`, and it cannot read hidden folders such as `~/.config` or `~/.claude`. Checked on 1.2.11:
+
+1. Put a Node.js build where the sandbox can run it, e.g. the official `node-v22.x-linux-x64.tar.xz` unpacked to `~/snap/antigravity-cli/common/node`.
+2. Start the server from a non-hidden path (the repository under `~/Desktop` works).
+3. The sandbox cannot read `~/.config/workspace-commander/projects.json`, so pin the workspace and the real home:
+   ```bash
+   agy mcp add --env HOME=$HOME --env WSC_WORKSPACE_DIR=<vault>/WorkspaceCommander/<project> workspace-commander -- \
+     ~/snap/antigravity-cli/common/node/bin/node <repo>/dist/cli.js mcp --agent Antigravity-01 --adapter antigravity
+   ```
+   `agy` CLI sessions then coordinate in that one workspace, whichever repository they are opened in.
+4. Expected but not verified (it needs a signed-in `agy`): its global rule file is inside its own home, `~/snap/antigravity-cli/common/.gemini/GEMINI.md`, not `~/.gemini/GEMINI.md`.
 
 ### OpenAI Codex CLI
 

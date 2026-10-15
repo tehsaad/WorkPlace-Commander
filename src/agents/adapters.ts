@@ -40,7 +40,7 @@ export interface InstructionTarget {
 }
 
 export interface McpSetup {
-  /** Shell command that registers `wsc mcp` with the tool; `{launch}` becomes the full server command line. */
+  /** Shell command that registers `wsc mcp`: `{launch}` is the full server command line, `{launchCommand}` / `{launchArgs}` its parts. */
   command?: string
   /** Where the configuration lands, for people who edit it by hand. */
   config: string
@@ -100,12 +100,15 @@ export const ADAPTERS: readonly AgentAdapter[] = [
       how: 'Gemini CLI loads ~/.gemini/GEMINI.md and <repo>/GEMINI.md into every chat.',
     },
     mcp: {
+      // `--` keeps the server's own flags (--agent, ...) from being read as gemini's.
+      command: 'gemini mcp add --scope user workspace-commander {launchCommand} -- {launchArgs}',
       config: '~/.gemini/settings.json → mcpServers (or <repo>/.gemini/settings.json)',
       snippet: 'json-mcpServers',
     },
     verified: '',
     notes: [
-      'Not installed on the machine this was built on: the MCP route is tested with a protocol-level client, not with Gemini CLI itself.',
+      'Gemini CLI asks before each MCP tool call unless the server is added with --trust.',
+      'Sign in once interactively (run `gemini`) before using `gemini -p` headless.',
       '~/.gemini/GEMINI.md is also read by Antigravity; each tool gets its own marked block naming its own id.',
     ],
   },
@@ -129,7 +132,8 @@ export const ADAPTERS: readonly AgentAdapter[] = [
     },
     verified: '',
     notes: [
-      'The agy CLI and the IDE keep separate MCP settings; add the server in each one you use.',
+      'The agy CLI and the IDE keep separate MCP settings; add the server in each one you use. The IDE (classic snap) reads ~/.gemini/config/mcp_config.json.',
+      'The agy CLI from the antigravity-cli snap is strictly confined: it has no node, cannot read hidden folders such as ~/.config, and its home is ~/snap/antigravity-cli/common. Give it a Node.js build inside that folder, start the server from a non-hidden path, and pin the workspace with WSC_WORKSPACE_DIR (it cannot read projects.json). See docs/INTEGRATIONS.md.',
       'If `workspace_status` shows the wrong project, the tool started the server outside the repository: add --cwd <repo> to the server arguments.',
     ],
   },

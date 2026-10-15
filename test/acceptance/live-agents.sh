@@ -22,6 +22,19 @@ NODE="$(command -v node)"
 TOOLS=("$@")
 [ ${#TOOLS[@]} -eq 0 ] && TOOLS=(claude codex antigravity gemini)
 
+# The antigravity-cli snap is strictly confined: no node, no hidden folders.
+# Run everything from its own home, with a Node.js build unpacked there
+# (docs/INTEGRATIONS.md) and a copy of this build at a path it can read.
+AGY_SNAP_HOME="$HOME/snap/antigravity-cli/common"
+AGY_STRICT=0
+if [[ " ${TOOLS[*]} " == *" antigravity "* ]] && [ "$(command -v agy)" = /snap/bin/agy ] \
+  && snap list antigravity-cli 2>/dev/null | awk 'NR==2 {exit $NF == "classic"}'; then
+  AGY_STRICT=1
+  [ -x "$AGY_SNAP_HOME/node/bin/node" ] || { echo "agy is a strict snap: unpack Node.js into $AGY_SNAP_HOME/node first" >&2; exit 1; }
+  mkdir -p "$AGY_SNAP_HOME/tmp"
+  export TMPDIR="$AGY_SNAP_HOME/tmp"
+fi
+
 T="$(mktemp -d "${TMPDIR:-/tmp}/wsc-live-XXXXXX")"
 export XDG_CONFIG_HOME="$T/config" WSC_VAULT="$T/vault"
 unset WSC_AGENT WSC_SESSION WSC_WORKSPACE_DIR WSC_CONFIG
@@ -83,8 +96,14 @@ run_tool() {
       ;;
     antigravity)
       AGY_SERVER="wsc-live-test"
+      local agy_node="$NODE" agy_cli="$CLI"
+      if [ "$AGY_STRICT" = 1 ]; then
+        agy_node="$AGY_SNAP_HOME/node/bin/node"
+        mkdir -p "$T/build" && cp -r "$ROOT/dist" "$ROOT/package.json" "$ROOT/AGENT_PROTOCOL.md" "$T/build/"
+        agy_cli="$T/build/dist/cli.js"
+      fi
       agy mcp add --env "WSC_VAULT=$WSC_VAULT" --env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" "$AGY_SERVER" -- \
-        "$NODE" "$CLI" mcp --agent "$id" --adapter antigravity --cwd "$PROJECT" >>"$log" 2>&1
+        "$agy_node" "$agy_cli" mcp --agent "$id" --adapter antigravity --cwd "$PROJECT" >>"$log" 2>&1
       (cd "$PROJECT" && timeout 600 agy -p "$(prompt "$id" "$title")" --print-timeout 540s ${AGY_FLAGS:-} </dev/null) >>"$log" 2>&1 || status=$?
       agy mcp remove "$AGY_SERVER" >/dev/null 2>&1 && AGY_SERVER=""
       ;;
