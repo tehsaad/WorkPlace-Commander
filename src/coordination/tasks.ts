@@ -6,9 +6,10 @@ import { atomicWrite, readText } from '../filesystem/atomic.ts'
 import { nextId, replaceSectionRaw, setFields, upsertSection } from '../obsidian/markdown.ts'
 import { parseAgents, parseTasks, renderTask, toTaskStatus } from '../obsidian/records.ts'
 import type { Identity, Workspace } from '../obsidian/workspace.ts'
-import type { Agent, Task, TaskStatus } from '../types.ts'
+import type { Task, TaskStatus } from '../types.ts'
 import { updateAgent } from '../agents/agents.ts'
 import { assertAgentId, escapeBody } from './validate.ts'
+import { isOwnerActive } from './context.ts'
 
 export class CoordinationError extends Error {
   constructor(message: string) {
@@ -139,19 +140,6 @@ export function claimTask(ws: Workspace, identity: Identity, id: string, options
   const takeover = result!.tookOverFrom ? ` (taken over from ${result!.tookOverFrom})` : ''
   ws.emit(identity, 'TASK_CLAIMED', `claimed ${task.id} ${task.title}${takeover}`, task.id)
   return result!
-}
-
-/**
- * Whether a task's owner still counts as working on it. An owner with an
- * AGENTS.md record is active while that record is online. An owner without
- * one (an agent using the CLI ad hoc, or one whose record is still being
- * written) is active while the task itself was updated recently: otherwise a
- * claim made milliseconds ago could be "taken over" as if abandoned.
- */
-export function isOwnerActive(owner: Agent | undefined, task: Task, now: number, staleMinutes: number): boolean {
-  if (owner) return isAgentOnline(owner, now, staleMinutes)
-  const updated = Date.parse(task.updated)
-  return Number.isNaN(updated) ? false : now - updated < staleMinutes * 60_000
 }
 
 export function releaseTask(ws: Workspace, identity: Identity, id: string, options: { force?: boolean; note?: string } = {}): Task {

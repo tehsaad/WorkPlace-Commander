@@ -1,3 +1,5 @@
+import { hostname } from 'node:os'
+
 import { isoNow } from '../events/format.ts'
 import { isAgentOnline } from '../dashboard/model.ts'
 import { replaceSectionRaw, setFields, setRegion, upsertSection } from '../obsidian/markdown.ts'
@@ -16,12 +18,49 @@ export interface RegisterOptions {
   kind?: string
   branch?: string
   cwd?: string
+  /** Tool capabilities to record (see src/agents/adapters.ts). */
+  capabilities?: string[]
+  /** `pid@host` of the long-lived process acting for this agent (the MCP server). */
+  process?: string
+  /**
+   * With an explicit `id`: if that id belongs to another session whose
+   * recorded process is still running on this machine, allocate the next
+   * free id with the same prefix instead of sharing the identity.
+   */
+  exclusive?: boolean
 }
 
 export interface RegisterResult {
   agent: Agent
   /** True when an existing record for this session was resumed (restart recovery). */
   resumed: boolean
+  /** The previous session of this id when it ended without `agent end` (crash, kill). */
+  recoveredFrom?: string
+  /** The preferred id that a live process already used (with `exclusive`). */
+  displaced?: string
+}
+
+/** `Gemini-01` -> `Gemini`; an id without a numeric suffix is its own prefix. */
+export function idPrefix(id: string): string {
+  return id.replace(/-\d+$/, '') || id
+}
+
+/** `pid@host` -> whether that process still runs. Unknown or another host counts as alive. */
+export function isProcessAlive(processRef: string | undefined): boolean {
+  const match = /^(\d+)@(.+)$/.exec(processRef ?? '')
+  if (!match) return false
+  if (match[2] !== hostname()) return true
+  try {
+    process.kill(Number(match[1]), 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+/** This process as a `Process:` value. */
+export function processRef(): string {
+  return `${process.pid}@${hostname()}`
 }
 
 /**
@@ -31,7 +70,7 @@ export interface RegisterResult {
  * new session reuses the lowest-numbered id whose agent is offline.
  */
 export function registerAgent(ws: Workspace, options: RegisterOptions): RegisterResult {
-  const prefix = (options.prefix ?? ws.resolved.config.agentPrefix).replace(/[^\w.-]/g, '') || 'Agent'
+  let prefix = (options.prefix ?? ws.resolved.config.agentPrefix).replace(/[^\w.-]/g, '') || 'Agent'
   const now = isoNow()
   const nowMs = Date.now()
   const stale = ws.resolved.config.staleAgentMinutes
@@ -40,6 +79,15 @@ export function registerAgent(ws: Workspace, options: RegisterOptions): Register
     const agents = parseAgents(text)
     let id = options.id?.trim() ? assertAgentId(options.id) : undefined
     let resumed = false
+    let displaced: string | undefined
+    if (id && options.exclusive) {
+      const holder = agents.find(a => a.id.toLowerCase() === id!.toLowerCase())
+      if (holder && holder.session !== options.session && isAgentOnline(holder, nowMs, stale) && isProcessAlive(holder.process)) {
+        displaced = id
+        prefix = idPrefix(id)
+        id = undefined
+      }
+    }
     if (!id) {
       const mine = agents.find(a => a.session === options.session && options.session !== '')
       if (mine) {
@@ -60,19 +108,28 @@ export function registerAgent(ws: Workspace, options: RegisterOptions): Register
     if (!id) throw new Error('No free agent id')
     const previous = agents.find(a => a.id.toLowerCase() === id!.toLowerCase())
     if (previous && previous.session === options.session) resumed = true
+    // Same id, another session that never ended: the tool restarted after a
+    // crash. Keep what it was working on; its tasks are still owned by this id.
+    const recoveredFrom =
+      !resumed && options.id && previous?.online && previous.session && !displaced ? previous.session : undefined
+    const keep = resumed || recoveredFrom !== undefined
+    const capabilities = options.capabilities ?? previous?.capabilities
+    const processValue = options.process ?? (resumed ? previous?.process : undefined)
     const agent: Agent = {
       id,
-      status: resumed && previous ? previous.status : 'IDLE',
-      task: resumed && previous ? previous.task : '',
+      status: keep && previous ? previous.status : 'IDLE',
+      task: keep && previous ? previous.task : '',
       branch: options.branch ?? ws.currentBranch(),
       session: options.session,
       kind: options.kind ?? previous?.kind ?? 'unknown',
       started: resumed && previous?.started ? previous.started : now,
       lastActivity: now,
-      workingState: resumed && previous ? previous.workingState : 'Session started',
+      workingState: resumed && previous ? previous.workingState : recoveredFrom ? `Restarted after session ${recoveredFrom}` : 'Session started',
       online: true,
+      ...(capabilities?.length ? { capabilities } : {}),
+      ...(processValue ? { process: processValue } : {}),
     }
-    result = { agent, resumed }
+    result = { agent, resumed, ...(recoveredFrom ? { recoveredFrom } : {}), ...(displaced ? { displaced } : {}) }
     return upsertSection(text, id, renderAgent(agent))
   })
   const { agent, resumed } = result!
@@ -80,6 +137,8 @@ export function registerAgent(ws: Workspace, options: RegisterOptions): Register
   writeSessionHeader(ws, agent, options.cwd ?? ws.resolved.projectRoot)
   if (resumed) {
     ws.emit(identity, 'SESSION_STARTED', `resumed session ${agent.session}`)
+  } else if (result!.recoveredFrom) {
+    ws.emit(identity, 'SESSION_STARTED', `restarted as ${agent.id} (session ${agent.session}; previous session ${result!.recoveredFrom} ended without notice)`)
   } else {
     ws.emit(identity, 'AGENT_REGISTERED', `registered (${agent.kind}) on ${agent.branch || 'no branch'}`, agent.id, {
       refreshNotes: false,

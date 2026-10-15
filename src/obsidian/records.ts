@@ -94,7 +94,7 @@ function fromDash(value: string | undefined): string {
 
 // ---------------------------------------------------------------- agents
 
-const AGENT_FIELDS = ['status', 'task', 'branch', 'session', 'kind', 'started', 'last activity', 'working state', 'online']
+const AGENT_FIELDS = ['status', 'task', 'branch', 'session', 'kind', 'capabilities', 'process', 'started', 'last activity', 'working state', 'online']
 
 export function parseAgents(text: string): Agent[] {
   return splitSections(text)
@@ -112,6 +112,8 @@ export function parseAgents(text: string): Agent[] {
         lastActivity: fromDash(fields.lastactivity),
         workingState: fromDash(fields.workingstate),
         online: fields.online === undefined ? true : isYes(fields.online),
+        ...(splitList(fromDash(fields.capabilities)).length ? { capabilities: splitList(fromDash(fields.capabilities)) } : {}),
+        ...(fromDash(fields.process) ? { process: fromDash(fields.process) } : {}),
       }
     })
 }
@@ -123,6 +125,8 @@ export function renderAgent(agent: Agent): string {
     { label: 'Branch', value: orDash(agent.branch) },
     { label: 'Session', value: orDash(agent.session) },
     { label: 'Kind', value: agent.kind },
+    { label: 'Capabilities', value: agent.capabilities?.length ? agent.capabilities.join(', ') : undefined },
+    { label: 'Process', value: agent.process || undefined },
     { label: 'Started', value: orDash(agent.started) },
     { label: 'Last Activity', value: orDash(agent.lastActivity) },
     { label: 'Working State', value: orDash(agent.workingState) },

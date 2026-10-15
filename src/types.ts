@@ -39,6 +39,10 @@ export interface Agent {
   lastActivity: string
   workingState: string
   online: boolean
+  /** What the agent's tool can do (`shell`, `mcp`, `wake`, ...); see src/agents/adapters.ts. */
+  capabilities?: string[]
+  /** `pid@host` of a long-lived process acting for the agent (the MCP server), for crash detection. */
+  process?: string
 }
 
 /** A live session of an agent (SESSIONS/<agent>.md header). */
@@ -129,6 +133,7 @@ export const EVENT_TYPES = [
   'REQUEST_CLOSED',
   'MILESTONE_REACHED',
   'COMMIT_CREATED',
+  'NOTE_ADDED',
 ] as const
 export type WorkspaceEventType = (typeof EVENT_TYPES)[number]
 
