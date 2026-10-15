@@ -16,7 +16,7 @@ import { execFileSync, spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { basename, extname, join, normalize, resolve } from 'node:path'
+import { basename, extname, join, normalize, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
 
@@ -342,6 +342,7 @@ export function createDashboard(options) {
             return send(res, 200, { ok: true, data: act(entry, identity, body) })
           } catch (error) {
             if (error instanceof HttpError) throw error
+            if (error?.name === 'ValidationError') throw new HttpError(400, error.message)
             if (error?.name === 'CoordinationError' || wc.CoordinationError && error instanceof wc.CoordinationError) {
               throw new HttpError(409, error.message, 'refused')
             }
@@ -353,7 +354,7 @@ export function createDashboard(options) {
       // Static files; the page gets this run's token.
       const file = url.pathname === '/' ? 'index.html' : normalize(url.pathname).replace(/^([/\\])+/, '')
       const path = join(publicDir, file)
-      if (!path.startsWith(publicDir) || !existsSync(path) || !statSync(path).isFile()) throw new HttpError(404, 'Not found')
+      if (!path.startsWith(publicDir + sep) || !existsSync(path) || !statSync(path).isFile()) throw new HttpError(404, 'Not found')
       let content = readFileSync(path)
       if (file === 'index.html') content = Buffer.from(content.toString('utf8').replace('__WC_TOKEN__', token))
       res.writeHead(200, {

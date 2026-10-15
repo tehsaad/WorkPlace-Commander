@@ -16,6 +16,7 @@ import type {
   TaskStatus,
 } from '../types.ts'
 import { humanTime } from '../events/format.ts'
+import { unescapeBody } from '../coordination/validate.ts'
 import { normalizeWord, parseFields, renderSection, splitList, splitSections } from './markdown.ts'
 
 // ---------------------------------------------------------------- statuses
@@ -77,8 +78,13 @@ function orDash(value: string): string {
 }
 
 /** Removes WC_EVENT metadata blocks (they precede the next heading) from a body. */
-function cleanBody(body: string): string {
+function stripEvents(body: string): string {
   return body.replace(/<!--\s*WC_EVENT[\s\S]*?-->/g, '').trim()
+}
+
+/** The body for display: event blocks removed, escaped headings restored. */
+function cleanBody(body: string): string {
+  return unescapeBody(stripEvents(body))
 }
 
 function fromDash(value: string | undefined): string {
@@ -88,7 +94,7 @@ function fromDash(value: string | undefined): string {
 
 // ---------------------------------------------------------------- agents
 
-const AGENT_FIELDS = ['status', 'task', 'branch', 'session', 'kind', 'started', 'last activity', 'working state', 'online']
+const AGENT_FIELDS = ['status', 'task', 'branch', 'session', 'kind', 'capabilities', 'process', 'started', 'last activity', 'working state', 'online']
 
 export function parseAgents(text: string): Agent[] {
   return splitSections(text)
@@ -106,6 +112,8 @@ export function parseAgents(text: string): Agent[] {
         lastActivity: fromDash(fields.lastactivity),
         workingState: fromDash(fields.workingstate),
         online: fields.online === undefined ? true : isYes(fields.online),
+        ...(splitList(fromDash(fields.capabilities)).length ? { capabilities: splitList(fromDash(fields.capabilities)) } : {}),
+        ...(fromDash(fields.process) ? { process: fromDash(fields.process) } : {}),
       }
     })
 }
@@ -117,6 +125,8 @@ export function renderAgent(agent: Agent): string {
     { label: 'Branch', value: orDash(agent.branch) },
     { label: 'Session', value: orDash(agent.session) },
     { label: 'Kind', value: agent.kind },
+    { label: 'Capabilities', value: agent.capabilities?.length ? agent.capabilities.join(', ') : undefined },
+    { label: 'Process', value: agent.process || undefined },
     { label: 'Started', value: orDash(agent.started) },
     { label: 'Last Activity', value: orDash(agent.lastActivity) },
     { label: 'Working State', value: orDash(agent.workingState) },
@@ -207,7 +217,8 @@ export function parseRequests(text: string): Request[] {
     .sections.filter(s => REQUEST_ID.test(s.id))
     .map(s => {
       const { fields, body } = parseFields(s.raw, REQUEST_FIELDS)
-      const subs = splitSubsections(cleanBody(body))
+      // Split before unescaping: an escaped `\### Answer` inside a body is text, not an answer.
+      const subs = splitSubsections(stripEvents(body)).map(sub => ({ ...sub, text: unescapeBody(sub.text) }))
       const answers: RequestAnswer[] = []
       let question = ''
       for (const sub of subs) {

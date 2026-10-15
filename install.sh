@@ -13,6 +13,7 @@
 #   --no-build            Skip npm install / build
 #   --no-claude           Do not register the plugin with Claude Code
 #   --no-link             Do not link the `wsc` command into ~/.local/bin
+#   --uninstall           Remove the Claude Code plugin and the wsc link (keeps the vault and config)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,6 +25,7 @@ FORCE_CONFIG=0
 BUILD=1
 CLAUDE=1
 LINK=1
+UNINSTALL=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -35,7 +37,8 @@ while [ $# -gt 0 ]; do
     --no-build) BUILD=0; shift ;;
     --no-claude) CLAUDE=0; shift ;;
     --no-link) LINK=0; shift ;;
-    -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -53,6 +56,43 @@ ask() {
   [[ "$reply" =~ ^[Yy] ]]
 }
 expand() { case "$1" in "~") echo "$HOME" ;; "~/"*) echo "$HOME/${1#\~/}" ;; *) echo "$1" ;; esac; }
+
+if [ "$UNINSTALL" = 1 ]; then
+  # Removes only what this installer added. The vault, its notes, the config
+  # and projects.json are yours and stay where they are.
+  bold "Uninstall"
+  if command -v claude >/dev/null; then
+    if claude plugin list 2>/dev/null | grep -q "workspace-commander@workspace-commander"; then
+      if claude plugin uninstall workspace-commander@workspace-commander >/dev/null 2>&1; then
+        ok "Removed the Claude Code plugin"
+      else
+        warn "Run: claude plugin uninstall workspace-commander@workspace-commander"
+      fi
+    else
+      ok "Claude Code plugin not installed"
+    fi
+    claude plugin marketplace remove workspace-commander >/dev/null 2>&1 && ok "Removed the workspace-commander marketplace" || true
+  fi
+  if [ -L "$HOME/.local/bin/wsc" ] && [ "$(readlink "$HOME/.local/bin/wsc")" = "$HERE/dist/cli.js" ]; then
+    rm "$HOME/.local/bin/wsc" && ok "Removed $HOME/.local/bin/wsc"
+  else
+    ok "No wsc link from this folder in ~/.local/bin"
+  fi
+  cat <<EOF
+
+  Kept (delete by hand if you want them gone):
+    config and project registry: ${XDG_CONFIG_HOME:-$HOME/.config}/workspace-commander
+    shared workspaces:           the WorkspaceCommander folder in your vault
+  Other tools keep their own entries; remove them in each tool:
+    agy mcp remove workspace-commander
+    codex mcp remove workspace-commander
+    Gemini CLI, Cursor: delete "workspace-commander" under mcpServers in their settings
+    standing rules: the block between <!-- wc:agent-setup:start --> and <!-- wc:agent-setup:end -->
+      in ~/.gemini/GEMINI.md, ~/.codex/AGENTS.md or the repository's rule files
+
+EOF
+  exit 0
+fi
 
 bold "1. Environment"
 OS="$(uname -s)"
@@ -170,6 +210,9 @@ cat <<EOF
   Dashboard:                  /wc        Git panel: /togglegit
   Development (watch build):  cd $HERE && npm run dev
   Projects:                   wsc projects      (registered on each repository's first session)
-  External agents, once each: wsc agent-setup antigravity --id Antigravity-01
+  Other AI tools, once each:  wsc adapters      (what is installed, supported, verified)
+                              wsc agent-setup gemini|antigravity|codex|cursor
+  Upgrade after a git pull:   ./install.sh --yes, then restart the sessions
+  Uninstall:                  ./install.sh --uninstall
 
 EOF

@@ -6,7 +6,9 @@ import { parseArgs } from 'node:util'
 import { endSession, heartbeat, listAgents, reapStaleAgents, registerAgent, setAgentStatus } from '../agents/agents.ts'
 import { loadConfig, registryPath, userConfigPath } from '../config/config.ts'
 import { proposeProject, readRegistry, saveProject, unlinkRoot } from '../config/projects.ts'
-import { AGENT_TARGETS, agentSetupSnippet, writeAgentSetup } from './setup.ts'
+import { ADAPTERS, defaultAgentId, findAdapter } from '../agents/adapters.ts'
+import { adapterStatus, agentSetupSnippet, describeCapabilities, mcpInstructions, writeAgentSetup } from './setup.ts'
+import { buildContext, formatContext, lastInboxNumber } from '../coordination/context.ts'
 import { DEFAULT_CONFIG } from '../config/defaults.ts'
 import {
   addMilestone,
@@ -28,13 +30,14 @@ import {
   releaseTask,
   setTaskStatus,
 } from '../coordination/tasks.ts'
+import { assertAgentId, ValidationError } from '../coordination/validate.ts'
 import { buildDashboard } from '../dashboard/model.ts'
 import { renderTextDashboard } from '../dashboard/text.ts'
 import { newSessionId } from '../events/format.ts'
 import { readText } from '../filesystem/atomic.ts'
 import { watchWorkspace } from '../filesystem/watch.ts'
 import { gitDir, gitLog, recordCommit, syncCommits } from '../git/git.ts'
-import { Workspace } from '../obsidian/workspace.ts'
+import { PACKAGE_ROOT, Workspace } from '../obsidian/workspace.ts'
 import type { Identity } from '../obsidian/workspace.ts'
 
 export const USAGE = `wsc — Workspace Commander
@@ -53,17 +56,22 @@ Projects (one workspace folder per project; ~/.config/workspace-commander/projec
   projects                              Every registered project
   project register [--name N]           Register this repository; --name of an existing project joins it
   project unregister                    Detach this repository (its notes are kept)
-  agent-setup <antigravity|cursor|codex|gemini|generic> --id ID [--write FILE]
-                                        One-time standing rule for another AI tool
+  adapters [TOOL]                       Supported AI tools: integration level, capabilities, what is installed
+  agent-setup <TOOL> [--id ID] [--write FILE]
+                                        One-time setup for another AI tool: its standing rule and MCP entry
+                                        TOOL: antigravity gemini codex cursor generic
+  mcp --agent ID [--adapter TOOL] [--cwd REPO]
+                                        Serve the coordination tools over MCP (stdio) for that tool
 
 Agents
-  agent register [--id ID | --prefix P] [--kind K] [--branch B]
+  agent register [--id ID | --prefix P] [--adapter TOOL | --kind K] [--capabilities a,b] [--exclusive] [--branch B]
   agent status <STATUS> [--task T] [--state TEXT]
                                         STATUS: IDLE PLANNING WORKING BLOCKED WAITING REVIEWING COMPLETED
   agent heartbeat [--state TEXT]
   agent end [--reason TEXT]
   agent reap                            Mark agents idle past staleAgentMinutes offline
   agents                                List agents
+  context [--mark-read]                 Your briefing: your open tasks, available tasks, unread messages, requests
 
 Planning and tasks
   plan create --objective TEXT --task T [--task T ...] [--assign Agent=Area] [--dep TEXT] [--note TEXT]
@@ -81,8 +89,11 @@ Communication
   request create --to <ID|ALL> [--title T] [--priority LOW|NORMAL|HIGH|URGENT] <question>
   request answer <REQUEST-ID> <answer> [--close]
   request close <REQUEST-ID>
+  request wait <REQUEST-ID> [--timeout SECONDS]
+                                        Block until the request is answered (default 60 s)
   requests [--open]
   milestone <title> [--note TEXT]
+  note add <text>                       Dated line in the Notes section of ProjectNotes.md (shared context)
 
 Git
   git [-n N]                            git log --oneline -n N
@@ -114,6 +125,11 @@ const OPTIONS = {
   name: { type: 'string' },
   write: { type: 'string' },
   prefix: { type: 'string' },
+  adapter: { type: 'string' },
+  capabilities: { type: 'string' },
+  exclusive: { type: 'boolean' },
+  timeout: { type: 'string' },
+  'mark-read': { type: 'boolean' },
   kind: { type: 'string' },
   branch: { type: 'string' },
   state: { type: 'string' },
@@ -149,7 +165,10 @@ function requireArg(value: string | undefined, what: string): string {
 function identityOf(flags: Flags, needed = true): Identity {
   const agent = flags.agent ?? process.env.WSC_AGENT ?? ''
   if (needed && !agent) throw new UsageError('No agent identity: pass --agent <ID> or set WSC_AGENT.')
-  return { agent, session: flags.session ?? process.env.WSC_SESSION ?? 'cli' }
+  if (agent) assertAgentId(agent)
+  const session = (flags.session ?? process.env.WSC_SESSION ?? '') || 'cli'
+  if (!/^[\w.:@-]{1,100}$/.test(session)) throw new UsageError(`Invalid session id ${JSON.stringify(session)}: letters, digits and . _ : @ - only.`)
+  return { agent, session }
 }
 
 function numberFlag(value: string | undefined): number | undefined {
@@ -166,7 +185,13 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
 
   const cwd = flags.cwd ?? process.cwd()
   // Read-only commands never write: not the registry, not the vault.
-  const isReadOnly = command === 'config' || command === 'projects' || command === 'agent-setup' || (command === 'project' && sub !== 'register')
+  const isReadOnly =
+    command === 'config' ||
+    command === 'projects' ||
+    command === 'agent-setup' ||
+    command === 'adapters' ||
+    (command === 'project' && sub !== 'register')
+  if (command === 'mcp') return mcpCommand(flags)
   if (command === 'project' && (sub === 'register' || sub === 'unregister')) return projectCommand(sub, cwd, flags)
   const ws = Workspace.open(cwd, flags.config, flags.agent ?? process.env.WSC_AGENT ?? '', { register: !isReadOnly })
   if (!isReadOnly) ws.init()
@@ -196,17 +221,41 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
       const projects = Object.entries(readRegistry(registryPath()).projects).map(([slug, p]) => ({ slug, ...p }))
       return listing(projects, p => `${p.slug.padEnd(24)} ${p.workspaceDir.padEnd(36)} ${p.roots.join(', ') || '-'}`)
     }
+    case 'adapters': {
+      const wanted = sub ? findAdapter(sub) : undefined
+      if (sub && !wanted) throw new UsageError(`Unknown tool ${sub}. One of: ${ADAPTERS.map(a => a.key).join(', ')}`)
+      const statuses = (wanted ? [wanted] : ADAPTERS).map(a => adapterStatus(a, ws.resolved.projectRoot))
+      const text = statuses
+        .map(a =>
+          [
+            `${a.name} (${a.key}) · ${a.level} · kind ${a.kind}`,
+            `  installed: ${a.installed || 'not found'}${a.configFound.length ? ` · config: ${a.configFound.join(', ')}` : ''}`,
+            `  rule: ${a.ruleInstalled.length ? a.ruleInstalled.join(', ') : 'not installed'} · verified: ${a.verified || 'no (unverified with the real tool)'}`,
+            ...(wanted ? [`  capabilities: ${describeCapabilities(a.capabilities)}`, ...a.notes.map(n => `  note: ${n}`)] : []),
+          ].join('\n'),
+        )
+        .join('\n')
+      return { data: wanted ? statuses[0] : statuses, text }
+    }
     case 'agent-setup': {
-      const tool = requireArg(sub, 'tool (antigravity, cursor, codex, gemini, generic)').toLowerCase()
-      const target = AGENT_TARGETS[tool]
-      if (!target) throw new UsageError(`Unknown tool ${tool}. One of: ${Object.keys(AGENT_TARGETS).join(', ')}`)
-      const id = requireArg(flags.id, '--id (e.g. Antigravity-01)')
-      const snippet = agentSetupSnippet(ws.resolved, tool, id)
+      const tool = requireArg(sub, `tool (${ADAPTERS.filter(a => a.key !== 'claude-code').map(a => a.key).join(', ')})`)
+      const adapter = findAdapter(tool)
+      if (!adapter) throw new UsageError(`Unknown tool ${tool}. One of: ${ADAPTERS.map(a => a.key).join(', ')}`)
+      const id = assertAgentId(flags.id ?? defaultAgentId(adapter), '--id')
+      const snippet = agentSetupSnippet(ws.resolved, adapter.key, id)
+      const mcp = mcpInstructions(adapter, id)
+      const where = adapter.instructions.how
       if (flags.write) {
         const written = writeAgentSetup(resolvePath(cwd, flags.write), snippet)
-        return { data: { ...written, snippet }, text: `Wrote the rule into ${written.file}${written.backup ? ` (previous copy: ${written.backup})` : ''}` }
+        return {
+          data: { ...written, snippet, mcp },
+          text: `Wrote the rule into ${written.file}${written.backup ? ` (previous copy: ${written.backup})` : ''}${mcp ? `\n\n${formatMcp(mcp)}` : ''}`,
+        }
       }
-      return { data: { snippet, where: target.where }, text: `${snippet}\n---\nPut this once in: ${target.where}\nOr run again with --write <file>.` }
+      return {
+        data: { snippet, where, mcp, adapter: adapter.key },
+        text: `${snippet}\n---\n1. Put the rule above once in: ${where}\n   Or run again with --write <file>${adapter.instructions.global ? ` (e.g. --write ${adapter.instructions.global})` : ''}.${mcp ? `\n2. ${formatMcp(mcp)}` : ''}`,
+      }
     }
     case 'config': {
       if (flags.init) {
@@ -261,6 +310,21 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
       }, 2_000).unref()
       return 'stream'
     }
+    case 'context': {
+      const identity = identityOf(flags)
+      const context = buildContext(ws.snapshot(), identity.agent, {
+        now: Date.now(),
+        staleMinutes: ws.resolved.config.staleAgentMinutes,
+        readUpTo: ws.readCursor(identity.agent),
+      })
+      if (flags['mark-read'] && context.inbox.length) ws.markRead(identity.agent, lastInboxNumber(context))
+      return { data: context, text: formatContext(context) }
+    }
+    case 'note': {
+      if (sub !== 'add') throw new UsageError('Usage: wsc note add <text>')
+      const line = ws.addNote(identityOf(flags), requireArg(rest.join(' '), 'note text'))
+      return { data: { file: ws.path('projectNotes'), line }, text: `Noted in ${ws.path('projectNotes')}` }
+    }
     case 'agents':
       return listing(listAgents(ws), a => `${a.id.padEnd(18)} ${a.status.padEnd(10)} ${a.online ? 'online ' : 'offline'} ${a.task}`)
     case 'agent': {
@@ -268,10 +332,16 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
         case 'register': {
           const id = identityOf(flags, false)
           const session = flags.session ?? process.env.WSC_SESSION ?? newSessionId()
+          const adapter = flags.adapter ? findAdapter(flags.adapter) : undefined
+          if (flags.adapter && !adapter) throw new UsageError(`Unknown adapter ${flags.adapter}. One of: ${ADAPTERS.map(a => a.key).join(', ')}`)
+          const capabilities = flags.capabilities?.split(/[,\s]+/).filter(Boolean) ?? adapter?.capabilities
+          if (capabilities?.some(c => !/^[a-z][\w-]{0,30}$/.test(c))) throw new UsageError('--capabilities: comma-separated lowercase words')
           const result = registerAgent(ws, {
             ...(flags.id ?? (id.agent || undefined) ? { id: flags.id ?? id.agent } : {}),
-            ...(flags.prefix ? { prefix: flags.prefix } : {}),
-            ...(flags.kind ? { kind: flags.kind } : {}),
+            ...(flags.prefix ? { prefix: flags.prefix } : adapter ? { prefix: adapter.idPrefix } : {}),
+            ...(flags.kind ? { kind: flags.kind } : adapter ? { kind: adapter.kind } : {}),
+            ...(capabilities ? { capabilities } : {}),
+            ...(flags.exclusive ? { exclusive: true } : {}),
             ...(flags.branch ? { branch: flags.branch } : {}),
             session,
             cwd,
@@ -279,7 +349,7 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
           const reaped = reapStaleAgents(ws, { agent: result.agent.id, session })
           return {
             data: { ...result, reaped, workspace: ws.root, project: ws.project, files: ws.resolved.files, config: ws.resolved.config },
-            text: `${result.resumed ? 'Resumed' : 'Registered'} ${result.agent.id} (session ${session})\nWorkspace: ${ws.root}\nexport WSC_AGENT=${result.agent.id} WSC_SESSION=${session}`,
+            text: `${result.resumed ? 'Resumed' : result.recoveredFrom ? 'Recovered' : 'Registered'} ${result.agent.id} (session ${session})${result.displaced ? `\n${result.displaced} is in use by a running session.` : ''}\nWorkspace: ${ws.root}\nexport WSC_AGENT=${result.agent.id} WSC_SESSION=${session}`,
           }
         }
         case 'status': {
@@ -398,6 +468,25 @@ export async function run(argv: string[]): Promise<CliResult | 'stream'> {
           const request = closeRequest(ws, identity, requireArg(rest[0], 'request id'))
           return { data: request, text: `Closed ${request.id}` }
         }
+        case 'wait': {
+          const id = requireArg(rest[0], 'request id')
+          const seconds = numberFlag(flags.timeout) ?? 60
+          if (!(seconds > 0 && seconds <= 3600)) throw new UsageError('--timeout must be 1-3600 seconds')
+          const find = () => listRequests(ws).find(r => r.id.toLowerCase() === id.toLowerCase())
+          if (!find()) throw new CoordinationError(`${id} does not exist in REQUESTS.md`)
+          const deadline = Date.now() + seconds * 1000
+          let request = find()!
+          while (request.status === 'OPEN' && Date.now() < deadline) {
+            await new Promise(resolveWait => setTimeout(resolveWait, 500))
+            request = find() ?? request
+          }
+          const answered = request.status !== 'OPEN'
+          const last = request.answers.at(-1)
+          return {
+            data: { answered, request },
+            text: answered ? `${request.id} ${request.status}${last ? ` · ${last.agent}: ${last.body}` : ''}` : `${request.id} has no answer after ${seconds} s`,
+          }
+        }
         case 'list':
           return run(['requests', ...(flags.open ? ['--open'] : []), ...(flags.json ? ['--json'] : [])])
         default:
@@ -435,7 +524,11 @@ function listing<T>(items: T[], line: (item: T) => string): CliResult {
 }
 
 export function isUsageError(error: unknown): boolean {
-  return error instanceof UsageError || (error as { code?: string })?.code?.startsWith('ERR_PARSE_ARGS') === true
+  return (
+    error instanceof UsageError ||
+    error instanceof ValidationError ||
+    (error as { code?: string })?.code?.startsWith('ERR_PARSE_ARGS') === true
+  )
 }
 
 export function isCoordinationError(error: unknown): error is CoordinationError {
@@ -476,4 +569,41 @@ function projectCommand(sub: 'register' | 'unregister', cwd: string, flags: Flag
     data: { slug: saved.slug, ...saved.entry },
     text: `${named ? 'Joined' : 'Registered'} ${root} → ${saved.slug} · ${saved.entry.workspaceDir}`,
   }
+}
+
+function formatMcp(mcp: NonNullable<ReturnType<typeof mcpInstructions>>): string {
+  return [
+    `Give the tool the coordination tools over MCP (${mcp.where}):`,
+    ...(mcp.command ? [`   ${mcp.command}`] : []),
+    ...(mcp.snippet ? [mcp.command ? '   or add to its config:' : '   Add to its config:', mcp.snippet.replace(/^/gm, '   ')] : []),
+  ].join('\n')
+}
+
+function packageVersion(): string {
+  try {
+    return String((JSON.parse(readText(join(PACKAGE_ROOT, 'package.json')) || '{}') as { version?: string }).version ?? '0.0.0')
+  } catch {
+    return '0.0.0'
+  }
+}
+
+/** `wsc mcp`: runs until the client closes stdin. */
+async function mcpCommand(flags: Flags): Promise<'stream'> {
+  const agent = assertAgentId(flags.agent ?? process.env.WSC_AGENT, '--agent')
+  const adapter = findAdapter(flags.adapter ?? 'generic')
+  if (!adapter) throw new UsageError(`Unknown adapter ${flags.adapter}. One of: ${ADAPTERS.map(a => a.key).join(', ')}`)
+  const { startMcpServer } = await import('../mcp/server.ts')
+  const server = startMcpServer({
+    agent,
+    adapter,
+    version: packageVersion(),
+    ...(flags.cwd ? { cwd: resolvePath(process.cwd(), flags.cwd) } : {}),
+    ...(flags.config ? { config: flags.config } : {}),
+    ...(flags.session ? { session: flags.session } : {}),
+    onExit: () => process.exit(0),
+  })
+  const stop = () => server.close('stopped by signal')
+  process.on('SIGTERM', stop)
+  process.on('SIGINT', stop)
+  return 'stream'
 }

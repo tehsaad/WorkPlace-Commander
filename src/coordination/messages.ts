@@ -14,6 +14,7 @@ import {
 import type { Identity, Workspace } from '../obsidian/workspace.ts'
 import type { Message, Milestone, Request, WorkspaceEventType } from '../types.ts'
 import { CoordinationError } from './tasks.ts'
+import { assertAgentId, assertRecipient, escapeBody, oneLineText, unescapeBody } from './validate.ts'
 
 function meta(identity: Identity, type: WorkspaceEventType, timestamp: string, ref: string): string {
   return formatEventMeta({ id: newEventId(), type, agent: identity.agent, session: identity.session, timestamp, ref, summary: '' })
@@ -28,15 +29,17 @@ function preview(text: string, length = 80): string {
 
 /** Appends a message to MESSAGES.md. `to` is an agent id or ALL. */
 export function sendMessage(ws: Workspace, identity: Identity, to: string, body: string): Message {
+  assertAgentId(identity.agent)
   if (!body.trim()) throw new CoordinationError('A message needs a body')
+  const recipient = assertRecipient(to.trim() || 'ALL')
   const timestamp = isoNow()
   let message: Message | undefined
   ws.appendRecord('messages', current => {
-    message = { id: nextId(current, 'MSG'), from: identity.agent, to: to.trim() || 'ALL', timestamp, body: body.trim() }
+    message = { id: nextId(current, 'MSG'), from: identity.agent, to: recipient, timestamp, body: escapeBody(body.trim()) }
     return `${meta(identity, 'MESSAGE_SENT', timestamp, message.id)}\n${renderMessage(message)}`
   })
   ws.emit(identity, 'MESSAGE_SENT', `messaged ${message!.to}: ${preview(body, 60)}`, message!.id)
-  return message!
+  return { ...message!, body: unescapeBody(message!.body) }
 }
 
 export function listMessages(ws: Workspace): Message[] {
@@ -65,21 +68,23 @@ export function createRequest(
   identity: Identity,
   input: { to: string; question: string; title?: string; priority?: string },
 ): Request {
+  assertAgentId(identity.agent)
   if (!input.question.trim()) throw new CoordinationError('A request needs a question')
   if (!input.to.trim()) throw new CoordinationError('A request needs a recipient (agent id or ALL)')
+  const to = assertRecipient(input.to)
   const now = isoNow()
   let request: Request | undefined
   ws.mutate('requests', text => {
     request = {
       id: nextId(text, 'REQUEST'),
-      title: (input.title?.trim() || preview(input.question, 60)).replace(/\n/g, ' '),
+      title: oneLineText(input.title?.trim() || preview(input.question, 60), 200),
       status: 'OPEN',
       from: identity.agent,
-      to: input.to.trim(),
+      to,
       priority: toPriority(input.priority),
       created: now,
       updated: now,
-      question: input.question.trim(),
+      question: escapeBody(input.question.trim()),
       answers: [],
     }
     return upsertSection(text, request.id, renderRequest(request))
@@ -99,6 +104,7 @@ export function answerRequest(
   body: string,
   options: { close?: boolean } = {},
 ): Request {
+  assertAgentId(identity.agent)
   if (!body.trim()) throw new CoordinationError('An answer needs a body')
   const now = isoNow()
   const status = options.close ? 'CLOSED' : 'ANSWERED'
@@ -108,7 +114,7 @@ export function answerRequest(
         { label: 'Status', value: status },
         { label: 'Updated', value: now },
       ])
-      return `${withFields.trimEnd()}\n\n${renderAnswer({ agent: identity.agent, timestamp: now, body })}`
+      return `${withFields.trimEnd()}\n\n${renderAnswer({ agent: identity.agent, timestamp: now, body: escapeBody(body) })}`
     })
     if (updated === undefined) throw new CoordinationError(`${id} does not exist in REQUESTS.md`)
     return updated
@@ -119,6 +125,7 @@ export function answerRequest(
 }
 
 export function closeRequest(ws: Workspace, identity: Identity, id: string): Request {
+  assertAgentId(identity.agent)
   const now = isoNow()
   const text = ws.mutate('requests', current => {
     const updated = replaceSectionRaw(current, id, raw =>
@@ -138,11 +145,12 @@ export function closeRequest(ws: Workspace, identity: Identity, id: string): Req
 // ---------------------------------------------------------------- milestones
 
 export function addMilestone(ws: Workspace, identity: Identity, title: string, note = ''): Milestone {
+  assertAgentId(identity.agent)
   if (!title.trim()) throw new CoordinationError('A milestone needs a title')
   const timestamp = isoNow()
   let milestone: Milestone | undefined
   ws.appendRecord('milestones', current => {
-    milestone = { id: nextId(current, 'MILESTONE'), title: title.trim(), agent: identity.agent, timestamp, note }
+    milestone = { id: nextId(current, 'MILESTONE'), title: oneLineText(title, 300), agent: identity.agent, timestamp, note: escapeBody(note) }
     return `${meta(identity, 'MILESTONE_REACHED', timestamp, milestone.id)}\n${renderMilestone(milestone)}`
   })
   ws.emit(identity, 'MILESTONE_REACHED', `reached ${milestone!.id} ${milestone!.title}`, milestone!.id)

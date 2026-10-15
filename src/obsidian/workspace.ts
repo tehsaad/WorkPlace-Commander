@@ -11,6 +11,7 @@ import { appendBlock, atomicWrite, mutateFile, readText, withLock } from '../fil
 import type { LockOptions } from '../filesystem/atomic.ts'
 import { countTasks, isAgentOnline } from '../dashboard/model.ts'
 import type { WorkspaceEvent, WorkspaceEventType, WorkspaceSnapshot } from '../types.ts'
+import { assertAgentId, escapeBody, oneLineText, ValidationError } from '../coordination/validate.ts'
 import { setRegion } from './markdown.ts'
 import { buildSnapshot, SNAPSHOT_FILES, snapshotPaths } from './snapshot.ts'
 import type { SnapshotFile } from './snapshot.ts'
@@ -268,6 +269,46 @@ export class Workspace {
       const base = text === '' ? this.projectNotesTemplate() : text
       return setRegion(base, 'status', lines.join('\n'))
     })
+  }
+
+  /** The highest message number already delivered to `agent` (wsc context / MCP). */
+  readCursor(agent: string): number {
+    const cursors = this.readState().cursors as Record<string, { message?: number }> | undefined
+    return Number(cursors?.[agent.toLowerCase()]?.message ?? 0) || 0
+  }
+
+  /** Advances `agent`'s read cursor; never moves it backwards. */
+  markRead(agent: string, message: number): void {
+    this.updateState(state => {
+      const cursors = { ...((state.cursors as Record<string, { message?: number }>) ?? {}) }
+      const key = agent.toLowerCase()
+      cursors[key] = { ...cursors[key], message: Math.max(Number(cursors[key]?.message ?? 0) || 0, message) }
+      return { ...state, cursors }
+    })
+  }
+
+  /**
+   * Appends a dated line to the `## Notes` section of ProjectNotes.md, the
+   * shared context every agent reads. Only that section is touched.
+   */
+  addNote(identity: Identity, input: string): string {
+    assertAgentId(identity.agent)
+    const text = escapeBody(oneLineText(input, 1000))
+    if (!text) throw new ValidationError('A note needs text')
+    const line = `- ${humanTime(isoNow())} · ${identity.agent}: ${text}`
+    this.mutate('projectNotes', current => {
+      const base = current === '' ? this.projectNotesTemplate() : current
+      const lines = base.replace(/\n+$/, '').split('\n')
+      const start = lines.findIndex(l => /^##\s+Notes\s*$/.test(l))
+      if (start === -1) return `${base.trimEnd()}\n\n## Notes\n\n${line}\n`
+      let end = lines.findIndex((l, i) => i > start && /^##\s/.test(l))
+      if (end === -1) end = lines.length
+      while (end > start + 1 && (lines[end - 1] ?? '').trim() === '') end--
+      lines.splice(end, 0, ...(end === start + 1 ? ['', line] : [line]))
+      return `${lines.join('\n')}\n`
+    })
+    this.emit(identity, 'NOTE_ADDED', `noted: ${text.slice(0, 80)}`)
+    return line
   }
 
   readState(): Record<string, unknown> {
